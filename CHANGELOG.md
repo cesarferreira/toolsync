@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.3] - 2026-11-27
+
+### 🐛 Bug Fixes
+
+- Skip unpushed main instead of failing with a custom pull command
+
+### ⚡ Performance
+
+- Cut git process launches per tool from 9 to 3
 ## [0.2.2] - 2026-11-27
 
 ### ⚡ Performance
