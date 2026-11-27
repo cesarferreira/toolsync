@@ -47,14 +47,14 @@ jobs:
         if: matrix.target != 'x86_64-pc-windows-msvc'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../toolsync-${{ matrix.target }}.tar.gz toolsync
+          tar czf ../../../toolsync-${{ matrix.target }}.tar.gz tsync
           cd ../../..
 
       - name: Package (Windows)
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/toolsync.exe" -DestinationPath "toolsync-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/tsync.exe" -DestinationPath "toolsync-${{ matrix.target }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
