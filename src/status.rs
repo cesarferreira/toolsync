@@ -51,6 +51,7 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
                     s.spawn(move || {
                         row.stage(ui::warn("checking remote main").to_string());
                         let mut st = state_ref.tools.get(name).cloned().unwrap_or_default();
+                        read_local_main(tool, &mut st);
                         let missed = apply(&mut st, check_remote(tool), now);
                         let (label, tone) = describe(Some(tool), &st);
                         row.done(
@@ -77,6 +78,13 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
         }
     }
     drop(lock);
+    if offline {
+        for (name, tool) in &list.tools {
+            if let Some(st) = state.tools.get_mut(name) {
+                read_local_main(tool, st);
+            }
+        }
+    }
 
     let names: BTreeSet<&String> = list.tools.keys().chain(state.tools.keys()).collect();
     if names.is_empty() {
@@ -190,6 +198,19 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
     };
     println!("{}", ui::dim(footer));
     Ok(())
+}
+
+/// The repo is the user's own, so `main` may have moved since the last sync.
+/// Read its local `main` instead of trusting the recorded value.
+fn read_local_main(tool: &Tool, st: &mut ToolState) {
+    if let Some(dir) = &tool.path
+        && let Ok(sha) = git::run(
+            Some(dir),
+            &["rev-parse", "--verify", "--quiet", "refs/heads/main"],
+        )
+    {
+        st.checkout = Some(sha);
+    }
 }
 
 /// Read remote `main` for one tool.

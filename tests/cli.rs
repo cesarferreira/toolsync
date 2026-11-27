@@ -729,3 +729,28 @@ fn pull_flag_skips_install_until_next_plain_sync() {
     assert!(out.contains("my-tool installed"), "{out}");
     assert_eq!(w.installs(), 1);
 }
+
+#[test]
+fn status_reads_local_main_from_the_repo() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    w.ok(&dev, &["add", "--install"]);
+    w.sync();
+    let v1 = w.head(&dev);
+
+    // Commit and push from the registered repo itself, without syncing.
+    fs::write(dev.join("src/nested/lib.txt"), "v2\n").unwrap();
+    git(&dev, &["commit", "--quiet", "-am", "v2"]);
+    git(&dev, &["push", "--quiet", "origin", "main"]);
+    let v2 = w.head(&dev);
+
+    for args in [&["status"][..], &["status", "--offline"][..]] {
+        let out = w.ok(w.tmp.path(), args);
+        let line = out.lines().find(|l| l.starts_with("my-tool")).unwrap();
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(cols[2], short(&v2), "{args:?}: {line}");
+        assert_eq!(cols[3], short(&v1), "{args:?}: {line}");
+        assert!(!line.contains("behind main"), "{args:?}: {line}");
+    }
+    assert!(w.status_line("my-tool").ends_with("install pending"));
+}
