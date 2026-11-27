@@ -4,10 +4,14 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use console::strip_ansi_codes;
+use console::{Term, strip_ansi_codes, truncate_str};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 
 use crate::ui;
+
+/// Columns left free at the end of each row, in case the terminal draws some
+/// characters wider than expected.
+const MARGIN: usize = 4;
 
 const TICK: Duration = Duration::from_millis(80);
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✔"];
@@ -32,14 +36,13 @@ impl Board {
         let live = !multi.is_hidden();
         let names: Vec<&String> = names.into_iter().collect();
         let width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
-        let style = ProgressStyle::with_template(
-            "{spinner:.cyan} {prefix:.bold.cyan}  {t:.dim}  {wide_msg}",
-        )
-        .expect("valid template")
-        .with_key("t", |state: &ProgressState, w: &mut dyn std::fmt::Write| {
-            let _ = w.write_str(&elapsed(state.elapsed()));
-        })
-        .tick_strings(SPINNER);
+        let style =
+            ProgressStyle::with_template("{spinner:.cyan} {prefix:.bold.cyan}  {t:.dim}  {msg}")
+                .expect("valid template")
+                .with_key("t", |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                    let _ = w.write_str(&elapsed(state.elapsed()));
+                })
+                .tick_strings(SPINNER);
 
         let rows = names
             .into_iter()
@@ -85,18 +88,24 @@ impl Row {
         self.live
     }
 
-    /// Show what this tool is doing right now.
+    /// Show what this tool is doing right now. The message is cut short of the
+    /// terminal edge: a row that wraps makes the redraw lose count of its lines
+    /// and leave stale rows behind.
     pub fn stage(&self, msg: impl Into<Cow<'static, str>>) {
-        self.bar.set_message(msg);
+        let msg = msg.into();
+        // spinner, name, elapsed, the gaps between them, and a safety margin.
+        let used = 2 + self.width + 2 + 6 + 2 + MARGIN;
+        let room = term_width().saturating_sub(used).max(10);
+        self.bar
+            .set_message(truncate_str(&msg, room, "...").into_owned());
     }
 
-    /// Show the latest line of a running command's output.
     pub fn activity(&self, what: &str, line: &str) {
         let line = strip_ansi_codes(line.trim()).to_string();
         self.stage(format!(
             "{} {}",
             ui::warn(what),
-            ui::dim(format!("· {line}"))
+            ui::dim(format!("- {line}"))
         ));
     }
 
@@ -177,4 +186,29 @@ fn elapsed(d: Duration) -> String {
         let _ = write!(out, "{:>2}m{:02}s", s / 60, s % 60);
     }
     out
+}
+
+fn term_width() -> usize {
+    Term::stderr()
+        .size_checked()
+        .map(|(_, cols)| usize::from(cols))
+        .unwrap_or(80)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_messages_never_reach_the_terminal_edge() {
+        let names = ["cesarferreira.github.io".to_string()];
+        let (_board, rows) = Board::new(&names);
+        let row = &rows[0];
+        let long = format!("Compiling {}", "x".repeat(500));
+        row.activity("installing", &long);
+        let shown = console::measure_text_width(&row.bar.message());
+        let fixed = 2 + row.width + 2 + 6 + 2;
+        assert!(shown + fixed + MARGIN <= term_width(), "{shown}");
+        assert!(row.bar.message().contains("..."));
+    }
 }

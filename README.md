@@ -51,7 +51,7 @@ tsync
 Syncing 4 tool(s), 4 at a time
 ✖ broken-cli    1.1s  install failed; will retry
 ● space         0.2s  skipped: on branch feature-x
-⠋ stax          1.5s  installing · Compiling anyhow v1.0.0
+⠋ stax          1.5s  installing - Compiling anyhow v1.0.0
 ✔ toppy         0.0s  synced aed9b83 (pull only)
 ```
 
