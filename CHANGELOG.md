@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.2] - 2026-11-27
+
+### ⚡ Performance
+
+- Skip the pull when the repo already has remote main
 ## [0.2.1] - 2026-11-27
 
 ### 🚀 Features
