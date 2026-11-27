@@ -77,8 +77,10 @@ pub fn remote_for_url(dir: &Path, url: &str) -> Result<Option<String>> {
 fn parse_remote_for_url(remotes: &str, url: &str) -> Option<String> {
     remotes.lines().find_map(|line| {
         let (name, rest) = line.split_once('\t')?;
-        let fetch_url = rest.strip_suffix(" (fetch)")?;
-        (fetch_url == url).then(|| name.to_string())
+        let (fetch_url, annotation) = rest.rsplit_once(" (fetch)")?;
+        // Git can append the partial clone filter, e.g. ` [blob:none]`.
+        let has_filter = annotation.starts_with(" [") && annotation.ends_with(']');
+        (fetch_url == url && (annotation.is_empty() || has_filter)).then(|| name.to_string())
     })
 }
 
@@ -178,6 +180,18 @@ mod tests {
         assert_eq!(
             parse_remote_for_url(out, "git@github.com:org/push-only.git"),
             None
+        );
+    }
+
+    #[test]
+    fn finds_partial_clone_remote_by_fetch_url() {
+        let out = "fork\t/local/other repo (fetch)\n\
+                   fork\t/local/my repo (fetch) (push)\n\
+                   upstream\t/local/my repo (fetch) (fetch) [blob:none]\n\
+                   upstream\t/local/my repo (fetch) (push)\n";
+        assert_eq!(
+            parse_remote_for_url(out, "/local/my repo (fetch)").as_deref(),
+            Some("upstream")
         );
     }
 }
