@@ -485,6 +485,28 @@ fn unpushed_commits_on_main_are_skipped() {
 }
 
 #[test]
+fn unpushed_commits_on_main_are_skipped_with_custom_pull_command() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    let pulls = w.path("pulls");
+    let cmd = format!("echo pulled >> '{}'", pulls.display());
+    w.ok(&dev, &["add", "--pull", &cmd]);
+
+    fs::write(dev.join("local.txt"), "x").unwrap();
+    git(&dev, &["add", "."]);
+    git(&dev, &["commit", "--quiet", "-m", "local"]);
+    let before = w.head(&dev);
+
+    let out = w.sync();
+    assert!(
+        out.contains("skipped: main has commits that aren't on origin"),
+        "{out}"
+    );
+    assert_eq!(w.head(&dev), before);
+    assert!(!pulls.exists(), "pull command ran");
+}
+
+#[test]
 fn diverged_main_is_an_error() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");

@@ -269,6 +269,18 @@ fn sync_tool(
             verify_after_pull(dir, entry, &desired, row).map_err(|e| sync(format!("{e:#}")))?
         }
         Some(cmd) => {
+            // Local main already holds remote main plus unpushed commits; a pull
+            // can't land on remote main, so leave it alone like the built-in sync.
+            if git::succeeds(
+                Some(dir),
+                &["merge-base", "--is-ancestor", &desired, "HEAD"],
+            )
+            .map_err(|e| sync(format!("{e:#}")))?
+            {
+                return Ok(Outcome::Skipped(format!(
+                    "main has commits that aren't on {remote}"
+                )));
+            }
             row.stage(format!("running {}", ui::cmd(cmd)));
             run_sync_command(dir, cmd).map_err(|e| sync(format!("{e:#}")))?;
             verify_after_pull(dir, entry, &desired, row).map_err(|e| sync(format!("{e:#}")))?
