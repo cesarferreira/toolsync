@@ -75,6 +75,12 @@ enum Command {
         #[arg(long)]
         offline: bool,
     },
+    /// Show where the tool list and local data live
+    Config {
+        /// Print only the tool list path, e.g. `$EDITOR "$(tsync config --path)"`
+        #[arg(long)]
+        path: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -106,5 +112,32 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Status { offline } => status::run(&paths, offline),
+        Command::Config { path } => {
+            if path {
+                println!("{}", paths.tools_file().display());
+            } else {
+                let exists = |p: &std::path::Path| {
+                    if p.exists() { "" } else { " (not created yet)" }
+                };
+                let rows = [
+                    ("Tool list", paths.tools_file().clone()),
+                    ("Checkouts", paths.root().join("repos")),
+                    ("State", paths.state_file()),
+                    ("Logs", paths.root().join("logs")),
+                ];
+                for (label, p) in rows {
+                    println!(
+                        "{}  {}{}",
+                        ui::bold(format!("{label:<9}")),
+                        p.display(),
+                        ui::dim(exists(&p))
+                    );
+                }
+                if std::env::var_os("TOOLSYNC_HOME").is_some() {
+                    println!("{}", ui::dim("Set by TOOLSYNC_HOME."));
+                }
+            }
+            Ok(())
+        }
     }
 }

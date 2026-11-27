@@ -60,6 +60,7 @@ tsync                    # same as `tsync sync`
 tsync -j 2               # same, at most 2 tools at a time
 tsync status             # check every remote in parallel, then show the table
 tsync status --offline   # last known state, no network
+tsync config             # where the tool list and data live
 ```
 
 All tools sync in parallel. Each tool gets a live spinner that shows what it is doing, including the latest line of install output, and turns into ✔ or ✖ when it finishes:
@@ -73,7 +74,16 @@ Syncing 3 tool(s), 3 at a time
 
 When output is not a terminal (a timer or a pipe), toolsync prints one plain line per tool instead.
 
-`tsync status` shows a table:
+`tsync status` checks every tool's remote at once the same way, and each row ends with the tool's state:
+
+```text
+Checking 3 tool(s)
+✔ alpha    0.4s  installed a852d2d
+● beta     0.5s  behind main a852d2d → 136b13b
+✖ gamma    0.3s  couldn't refresh; showing last known a852d2d
+```
+
+Piped or with `--offline`, it prints a table instead:
 
 ```text
 TOOL       MAIN     CHECKOUT  INSTALLED  CHECKED  STATUS
@@ -127,6 +137,8 @@ pull = "stax rs"                   # absent = built-in git fast-forward
 |---|---|
 | Tool list | `~/.config/toolsync/tools.toml` (macOS: `~/Library/Application Support/toolsync/tools.toml`) |
 | Managed checkouts, state, logs | `~/.local/share/toolsync/` (macOS: `~/Library/Application Support/toolsync/`) |
+
+`tsync config` prints these paths for this machine. `tsync config --path` prints only the tool list path, for example `$EDITOR "$(tsync config --path)"`.
 
 Set `TOOLSYNC_HOME` to keep everything, including `tools.toml`, in one directory.
 

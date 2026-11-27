@@ -135,6 +135,22 @@ impl Row {
         }
     }
 
+    /// Finish a live row with a custom mark. Non-terminal output is left to the caller.
+    pub fn done(&self, mark: impl std::fmt::Display, outcome: impl std::fmt::Display) {
+        if self.live {
+            let msg = format!(
+                "{} {}  {}  {}",
+                mark,
+                ui::name(format!("{:<w$}", self.name, w = self.width)),
+                ui::dim(elapsed(self.bar.elapsed())),
+                outcome
+            );
+            self.finish(msg);
+        } else {
+            self.bar.finish_and_clear();
+        }
+    }
+
     fn finish(&self, msg: String) {
         self.bar
             .set_style(ProgressStyle::with_template("{msg}").expect("valid template"));

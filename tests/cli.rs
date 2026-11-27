@@ -457,6 +457,14 @@ fn offline_sync_reports_refresh_failure_and_keeps_last_known_state() {
         line.contains("couldn't refresh; showing last known"),
         "{line}"
     );
+
+    // A second offline status reports the failure once, not twice.
+    let status = w.ok(w.tmp.path(), &["status"]);
+    assert_eq!(
+        status.matches("my-tool: couldn't reach").count(),
+        1,
+        "{status}"
+    );
 }
 
 #[test]
@@ -603,4 +611,21 @@ fn status_reads_remote_main_live_and_offline_skips_it() {
     let offline = w.ok(w.tmp.path(), &["status", "--offline"]);
     assert!(offline.contains("behind main"), "{offline}");
     assert_eq!(w.installs(), 1);
+}
+
+#[test]
+fn config_shows_paths() {
+    let w = World::new();
+    let out = w.ok(w.tmp.path(), &["config", "--path"]);
+    assert_eq!(
+        out.trim(),
+        w.home().join("tools.toml").display().to_string()
+    );
+    let out = w.ok(w.tmp.path(), &["config"]);
+    assert!(out.contains("Tool list"), "{out}");
+    assert!(out.contains("not created yet"), "{out}");
+    assert!(
+        out.contains(&w.home().join("logs").display().to_string()),
+        "{out}"
+    );
 }

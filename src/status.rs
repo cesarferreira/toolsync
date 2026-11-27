@@ -1,12 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::thread;
-use std::time::Duration;
 
 use anyhow::Result;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::git;
 use crate::paths::Paths;
+use crate::progress::Board;
 use crate::state::{ErrorKind, State, ToolError, ToolState, ago, now};
 use crate::sync::{acquire_lock, short};
 use crate::tools::{Tool, ToolList};
@@ -35,29 +34,43 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
     let mut state = State::load(paths)?;
     let now = now();
     let mut unreachable = BTreeMap::new();
-    if !offline {
-        for (name, result) in check_remotes(&list) {
-            let st = state.tools.entry(name.clone()).or_default();
-            match result {
-                Ok(sha) => {
-                    st.remote_main = Some(sha);
-                    st.remote_checked_at = Some(now);
-                    if st
-                        .error
-                        .as_ref()
-                        .is_some_and(|e| e.kind == ErrorKind::Refresh)
-                    {
-                        st.error = None;
-                    }
-                }
-                Err(message) => {
-                    if st.error.is_none() {
-                        st.error = Some(ToolError::new(ErrorKind::Refresh, message));
-                    } else {
-                        unreachable.insert(name, message);
-                    }
-                }
+    let mut live = false;
+    if !offline && !list.tools.is_empty() {
+        let (board, rows) = Board::new(list.tools.keys());
+        live = board.is_live();
+        if live {
+            board.println(&ui::dim(format!("Checking {} tool(s)", list.tools.len())).to_string());
+        }
+        let state_ref = &state;
+        let results: Vec<_> = thread::scope(|s| {
+            let handles: Vec<_> = list
+                .tools
+                .iter()
+                .zip(rows)
+                .map(|((name, tool), row)| {
+                    s.spawn(move || {
+                        row.stage(ui::warn("checking remote main").to_string());
+                        let mut st = state_ref.tools.get(name).cloned().unwrap_or_default();
+                        let missed = apply(&mut st, check_remote(tool), now);
+                        let (label, tone) = describe(Some(tool), &st);
+                        row.done(
+                            tone.mark(),
+                            format!("{} {}", tone.paint(label), ui::dim(shas(&st))),
+                        );
+                        (name.clone(), st, missed)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("status thread panicked"))
+                .collect()
+        });
+        for (name, st, missed) in results {
+            if let Some(message) = missed {
+                unreachable.insert(name.clone(), message);
             }
+            state.tools.insert(name, st);
         }
         if lock.is_some() {
             state.save(paths)?;
@@ -106,11 +119,34 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
                 ui::cmd(format!("tsync remove {name}"))
             ));
         } else if let Some(err) = &st.error {
-            details.push(format!("{}: {}", ui::name(name), ui::dim(&err.message)));
-        }
-        if let Some(message) = unreachable.get(name) {
+            // git's "couldn't reach" output runs over several lines; the first says enough.
+            let message = match err.kind {
+                ErrorKind::Refresh => first_line(&err.message),
+                _ => &err.message,
+            };
             details.push(format!("{}: {}", ui::name(name), ui::dim(message)));
         }
+        if let Some(message) = unreachable.get(name) {
+            details.push(format!(
+                "{}: {}",
+                ui::name(name),
+                ui::dim(first_line(message))
+            ));
+        }
+    }
+
+    if live {
+        // The board already showed one finished row per tool.
+        if !details.is_empty() {
+            println!();
+        }
+        for d in &details {
+            println!("{d}");
+        }
+        if tones.iter().any(|t| matches!(t, Tone::Warn)) {
+            println!("Run {} to pull and install.", ui::cmd("tsync"));
+        }
+        return Ok(());
     }
 
     let mut widths = [0; 6];
@@ -156,48 +192,56 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
     Ok(())
 }
 
-/// Read remote `main` for every tool at once, with a spinner on a terminal.
-fn check_remotes(list: &ToolList) -> Vec<(String, Result<String, String>)> {
-    if list.tools.is_empty() {
-        return Vec::new();
+/// Read remote `main` for one tool.
+fn check_remote(tool: &Tool) -> Result<String, String> {
+    match git::remote_main(None, &tool.url) {
+        Ok(Some(sha)) => Ok(sha),
+        Ok(None) => Err(format!("{} has no `main` branch", tool.url)),
+        Err(err) => Err(format!("{err:#}")),
     }
-    let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
-    spinner.set_style(
-        ProgressStyle::with_template("{spinner:.cyan} {msg}")
-            .expect("valid template")
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", " "]),
-    );
-    spinner.set_message(
-        ui::dim(format!(
-            "Checking remote main for {} tool(s)",
-            list.tools.len()
-        ))
-        .to_string(),
-    );
-    spinner.enable_steady_tick(Duration::from_millis(80));
+}
 
-    let results = thread::scope(|s| {
-        let handles: Vec<_> = list
-            .tools
-            .iter()
-            .map(|(name, tool)| {
-                s.spawn(move || {
-                    let result = match git::remote_main(None, &tool.url) {
-                        Ok(Some(sha)) => Ok(sha),
-                        Ok(None) => Err(format!("{} has no `main` branch", tool.url)),
-                        Err(err) => Err(format!("{err:#}")),
-                    };
-                    (name.clone(), result)
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("remote check thread panicked"))
-            .collect()
-    });
-    spinner.finish_and_clear();
-    results
+/// Record a live check. Returns the error message when it can't be stored
+/// because the tool already has a more important error.
+fn apply(st: &mut ToolState, result: Result<String, String>, now: u64) -> Option<String> {
+    match result {
+        Ok(sha) => {
+            st.remote_main = Some(sha);
+            st.remote_checked_at = Some(now);
+            if st
+                .error
+                .as_ref()
+                .is_some_and(|e| e.kind == ErrorKind::Refresh)
+            {
+                st.error = None;
+            }
+            None
+        }
+        Err(message)
+            if st
+                .error
+                .as_ref()
+                .is_none_or(|e| e.kind == ErrorKind::Refresh) =>
+        {
+            st.error = Some(ToolError::new(ErrorKind::Refresh, message));
+            None
+        }
+        Err(message) => Some(message),
+    }
+}
+
+/// Short SHA context for a finished live row.
+fn shas(st: &ToolState) -> String {
+    match (&st.checkout, &st.remote_main) {
+        (Some(c), Some(m)) if c != m => format!("{} → {}", short(c), short(m)),
+        (Some(c), _) => short(c).to_string(),
+        (None, Some(m)) => format!("main {}", short(m)),
+        (None, None) => String::new(),
+    }
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or(text)
 }
 
 fn sha(value: &Option<String>) -> String {
@@ -212,6 +256,14 @@ enum Tone {
 }
 
 impl Tone {
+    fn mark(self) -> String {
+        match self {
+            Tone::Good => ui::good("✔").to_string(),
+            Tone::Warn => ui::warn("●").to_string(),
+            Tone::Bad => ui::bad("✖").to_string(),
+        }
+    }
+
     fn paint(self, text: String) -> String {
         match self {
             Tone::Good => ui::good(text).to_string(),
