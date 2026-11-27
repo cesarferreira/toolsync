@@ -786,3 +786,52 @@ fn up_to_date_repo_is_not_pulled() {
     w.sync();
     assert_eq!(count(), 1);
 }
+
+/// Each process launch can cost ~0.25s on machines with endpoint-security
+/// agents, so an up-to-date tool must stay at a few git calls.
+#[test]
+fn up_to_date_sync_runs_few_git_processes() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    w.ok(&dev, &["add", "-y"]);
+    w.sync();
+
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let shim_dir = w.path("shim");
+    fs::create_dir_all(&shim_dir).unwrap();
+    let log = w.path("git-calls");
+    let shim = shim_dir.join("git");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            real_git.trim()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        shim_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = w.run_env(w.tmp.path(), &["sync"], &[("PATH", &path)]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("up to date"), "{}", text(&out));
+    let calls = fs::read_to_string(&log).unwrap();
+    // ls-remote, remote -v, status.
+    assert_eq!(calls.lines().count(), 3, "git calls:\n{calls}");
+}

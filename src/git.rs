@@ -63,37 +63,121 @@ pub fn remote_main(dir: Option<&Path>, remote: &str) -> Result<Option<String>> {
     }
 }
 
-/// Name of the remote in `dir` whose URL is `url`.
+/// Name of the remote in `dir` whose fetch URL is `url`.
+///
+/// One `git remote -v` call. Process launches are slow on some machines, so
+/// this avoids one `git remote get-url` per remote.
 pub fn remote_for_url(dir: &Path, url: &str) -> Result<Option<String>> {
-    for remote in run(Some(dir), &["remote"])?.lines() {
-        if run(Some(dir), &["remote", "get-url", remote])? == url {
-            return Ok(Some(remote.to_string()));
-        }
-    }
-    Ok(None)
+    Ok(parse_remote_for_url(
+        &run(Some(dir), &["remote", "-v"])?,
+        url,
+    ))
 }
 
-/// Current branch name, or `None` on a detached HEAD.
-pub fn current_branch(dir: &Path) -> Result<Option<String>> {
-    let out = output(Some(dir), &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
-    if out.status.success() {
-        Ok(Some(
-            String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        ))
-    } else {
-        Ok(None)
+fn parse_remote_for_url(remotes: &str, url: &str) -> Option<String> {
+    remotes.lines().find_map(|line| {
+        let (name, rest) = line.split_once('\t')?;
+        let fetch_url = rest.strip_suffix(" (fetch)")?;
+        (fetch_url == url).then(|| name.to_string())
+    })
+}
+
+/// Branch, HEAD and cleanliness of a work tree, read in one `git status` call.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RepoState {
+    /// `None` on a detached HEAD.
+    pub branch: Option<String>,
+    /// `None` when the branch has no commits yet.
+    pub head: Option<String>,
+    /// True when tracked files have uncommitted changes.
+    pub dirty: bool,
+}
+
+pub fn repo_state(dir: &Path) -> Result<RepoState> {
+    let out = run(
+        Some(dir),
+        &[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=no",
+        ],
+    )?;
+    Ok(parse_repo_state(&out))
+}
+
+fn parse_repo_state(status: &str) -> RepoState {
+    let mut state = RepoState {
+        branch: None,
+        head: None,
+        dirty: false,
+    };
+    for line in status.lines() {
+        if let Some(oid) = line.strip_prefix("# branch.oid ") {
+            state.head = (oid != "(initial)").then(|| oid.to_string());
+        } else if let Some(name) = line.strip_prefix("# branch.head ") {
+            state.branch = (name != "(detached)").then(|| name.to_string());
+        } else if !line.starts_with('#') && !line.trim().is_empty() {
+            state.dirty = true;
+        }
     }
+    state
 }
 
 pub fn head(dir: &Path) -> Result<String> {
     run(Some(dir), &["rev-parse", "HEAD"])
 }
 
-/// True when tracked files have uncommitted changes.
-pub fn is_dirty(dir: &Path) -> Result<bool> {
-    let status = run(
-        Some(dir),
-        &["status", "--porcelain", "--untracked-files=no"],
-    )?;
-    Ok(!status.is_empty())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_clean_repo_on_a_branch() {
+        let out = "# branch.oid 41bf7171804166213b30c62e1c6d2efa54512337\n\
+                   # branch.head main\n\
+                   # branch.upstream origin/main\n\
+                   # branch.ab +0 -0\n";
+        assert_eq!(
+            parse_repo_state(out),
+            RepoState {
+                branch: Some("main".into()),
+                head: Some("41bf7171804166213b30c62e1c6d2efa54512337".into()),
+                dirty: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_detached_dirty_repo() {
+        let out = "# branch.oid 41bf7171804166213b30c62e1c6d2efa54512337\n\
+                   # branch.head (detached)\n\
+                   1 .M N... 100644 100644 100644 aaa bbb src/main.rs\n";
+        let state = parse_repo_state(out);
+        assert_eq!(state.branch, None);
+        assert!(state.dirty);
+    }
+
+    #[test]
+    fn parses_repo_without_commits() {
+        let state = parse_repo_state("# branch.oid (initial)\n# branch.head main\n");
+        assert_eq!(state.head, None);
+        assert_eq!(state.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn finds_remote_by_fetch_url() {
+        let out = "fork\tgit@github.com:me/x.git (fetch)\n\
+                   fork\tgit@github.com:me/x.git (push)\n\
+                   origin\tgit@github.com:org/x.git (fetch)\n\
+                   origin\tgit@github.com:org/push-only.git (push)\n";
+        assert_eq!(
+            parse_remote_for_url(out, "git@github.com:org/x.git").as_deref(),
+            Some("origin")
+        );
+        assert_eq!(
+            parse_remote_for_url(out, "git@github.com:org/push-only.git"),
+            None
+        );
+    }
 }

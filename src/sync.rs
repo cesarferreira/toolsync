@@ -245,14 +245,15 @@ fn sync_tool(
     };
     row.stage("checking local repo");
     let remote = local_remote(dir, &tool.url).map_err(|e| sync(format!("{e:#}")))?;
-    if let Some(reason) = skip_reason(dir).map_err(|e| sync(format!("{e:#}")))? {
+    let repo = git::repo_state(dir).map_err(|e| sync(format!("{e:#}")))?;
+    if let Some(reason) = skip_reason(&repo) {
         return Ok(Outcome::Skipped(reason));
     }
 
-    // Remote main was just read; if the repo already has it, there is nothing to pull.
-    let current = git::head(dir).map_err(|e| sync(format!("{e:#}")))?;
-    match tool.pull.as_deref() {
-        _ if current == desired => {}
+    // Remote main was just read; if the repo already has it, there is nothing to
+    // pull. The repo is then on a clean main at `desired`, so it needs no second check.
+    let head = match tool.pull.as_deref() {
+        _ if repo.head.as_deref() == Some(desired.as_str()) => desired.clone(),
         None => {
             row.stage("pulling main");
             // Built-in sync fetches again; use that newer observation of main.
@@ -265,17 +266,15 @@ fn sync_tool(
                 }
             }
             entry.remote_main = Some(desired.clone());
+            verify_after_pull(dir, entry, &desired, row).map_err(|e| sync(format!("{e:#}")))?
         }
         Some(cmd) => {
             row.stage(format!("running {}", ui::cmd(cmd)));
-            run_sync_command(dir, cmd).map_err(|e| sync(format!("{e:#}")))?
+            run_sync_command(dir, cmd).map_err(|e| sync(format!("{e:#}")))?;
+            verify_after_pull(dir, entry, &desired, row).map_err(|e| sync(format!("{e:#}")))?
         }
-    }
-
-    row.stage("verifying repo");
-    let head = git::head(dir).map_err(|e| sync(format!("{e:#}")))?;
+    };
     entry.checkout = Some(head.clone());
-    verify_checkout(dir, &head, &desired).map_err(|e| sync(format!("{e:#}")))?;
 
     let Some(install_cmd) = tool.install.as_deref() else {
         return Ok(Outcome::PullOnly(head));
@@ -312,23 +311,13 @@ fn local_remote(dir: &Path, url: &str) -> Result<String> {
 }
 
 /// Sync only touches a repo that is on `main` with no uncommitted changes.
-fn skip_reason(dir: &Path) -> Result<Option<String>> {
-    match git::current_branch(dir)?.as_deref() {
+fn skip_reason(repo: &git::RepoState) -> Option<String> {
+    match repo.branch.as_deref() {
         Some("main") => {}
-        Some(branch) => return Ok(Some(format!("on branch {branch}"))),
-        None => return Ok(Some("detached HEAD".into())),
+        Some(branch) => return Some(format!("on branch {branch}")),
+        None => return Some("detached HEAD".into()),
     }
-    if git::is_dirty(dir)? {
-        return Ok(Some("uncommitted changes".into()));
-    }
-    Ok(None)
-}
-
-fn ensure_clean(dir: &Path) -> Result<()> {
-    if git::is_dirty(dir)? {
-        bail!("{} has uncommitted changes after sync", dir.display());
-    }
-    Ok(())
+    repo.dirty.then(|| "uncommitted changes".into())
 }
 
 /// Fast-forward `main` to `<remote>/main`. Returns the new HEAD, or `None` when
@@ -392,22 +381,34 @@ fn run_sync_command(dir: &Path, cmd: &str) -> Result<()> {
 }
 
 /// A sync only counts when the repo is clean, on main, and at the expected commit.
-fn verify_checkout(dir: &Path, head: &str, desired: &str) -> Result<()> {
-    let branch = git::current_branch(dir)?;
-    if branch.as_deref() != Some("main") {
+/// Returns the new HEAD.
+fn verify_after_pull(
+    dir: &Path,
+    entry: &mut ToolState,
+    desired: &str,
+    row: &Row,
+) -> Result<String> {
+    row.stage("verifying repo");
+    let repo = git::repo_state(dir)?;
+    let head = repo.head.context("repo has no commits after sync")?;
+    entry.checkout = Some(head.clone());
+    if repo.branch.as_deref() != Some("main") {
         bail!(
             "repo is on {} after sync, expected main",
-            branch.as_deref().unwrap_or("a detached HEAD")
+            repo.branch.as_deref().unwrap_or("a detached HEAD")
         );
     }
     if head != desired {
         bail!(
             "repo is at {} after sync, expected main at {}",
-            short(head),
+            short(&head),
             short(desired)
         );
     }
-    ensure_clean(dir)
+    if repo.dirty {
+        bail!("{} has uncommitted changes after sync", dir.display());
+    }
+    Ok(head)
 }
 
 fn install(paths: &Paths, name: &str, dir: &Path, cmd: &str, row: &Row) -> Result<()> {
