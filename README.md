@@ -38,25 +38,18 @@ toolsync --help
 <a id="quickstart"></a>
 ## Quickstart
 
-Create an empty Git repo for the shared manifest (for example `toolsync-manifest`), then enroll each machine once:
-
-```bash
-toolsync init git@github.com:you/toolsync-manifest.git
-```
-
 Register a tool from any directory inside its repo, on any branch:
 
 ```bash
-toolsync add             # track remote main, pull only
-toolsync add --install   # track remote main and run `make install-release`
-toolsync publish         # commit and push the manifest change
+toolsync add --install     # track remote main and run `make install-release`
+toolsync add               # track remote main, pull only
 ```
 
-On every enrolled machine:
+Then pull and install everything you registered:
 
 ```bash
-toolsync apply    # refresh the manifest, sync, and install as needed
-toolsync status   # this machine's last known state (no network)
+toolsync          # same as `toolsync sync`
+toolsync status   # last known state (no network)
 ```
 
 ```text
@@ -65,49 +58,57 @@ my-tool    a91c2d1  a91c2d1   71ef3b0    4m ago   install failed; will retry
 other-cli  4a92f37  4a92f37   —          4m ago   synced (pull only)
 ```
 
+`INSTALLED` is the last commit whose install command succeeded on this machine. It does not prove that the binary on `PATH` matches it.
+
 Stop tracking a tool:
 
 ```bash
 toolsync remove            # from inside the repo, or `toolsync remove <name>`
-toolsync publish
-toolsync remove <name> --purge   # on each machine: delete its managed checkout and state
 ```
 
-`--purge` refuses to delete a checkout that has uncommitted changes or unpushed commits. toolsync never uninstalls binaries.
+`remove` also deletes the managed checkout. It refuses if that checkout has uncommitted changes or unpushed commits. toolsync never uninstalls binaries.
 
-`INSTALLED` is the last commit that `make install-release` built successfully on this machine. It does not prove that the binary on `PATH` matches it.
+## Custom pull and install commands
+
+Each tool can have its own commands. They run with `sh -c` inside the managed checkout.
+
+```bash
+toolsync add --install "cargo install --path ."   # custom install command
+toolsync add --pull "stax rs"                     # custom pull command
+toolsync add --pull ""                            # back to the built-in git sync
+toolsync add --pull-only                          # stop installing
+```
+
+Running `add` again only changes the options you pass. A plain `add` never turns off installing.
+
+After any pull, the checkout must be clean, on `main`, and at the latest remote commit. If not, toolsync reports a sync error and skips the install. A zero exit code is not enough.
 
 ## How it works
 
-- **Manifest.** The manifest is `toolsync.toml` in a shared Git repo. Each entry holds only a repo URL and a mode (`pull` or `install`). It holds no paths, branches, or shell commands.
-- **Managed checkouts.** `apply` clones each tool into its own checkout, separate from your development clone. The built-in sync fast-forwards `main` only. A dirty or diverged checkout is an error and is never overwritten.
-- **Installs.** For `install` entries, `make install-release` runs when remote `main` differs from the last successful install. A failed install keeps the previous SHA, and the next run retries it. Build output goes to the install log in the data directory.
-- **Failures.** One failing tool does not stop the others. `apply` exits nonzero with a summary if anything failed, including a manifest refresh.
-- **Locking.** Only one `apply` runs at a time on a machine.
+- **Tool list.** Each machine keeps its own list in `tools.toml`. Each entry has a repo URL and optional `install` and `pull` commands. It holds no paths or branches, so you can edit it by hand.
+- **Managed checkouts.** `sync` clones each tool into its own checkout, separate from your development clone. The built-in pull fast-forwards `main` only. A dirty or diverged checkout is an error and is never overwritten.
+- **Installs.** The install command runs when remote `main` differs from the last successful install. A failed install keeps the previous SHA, and the next run retries it. Install output goes to a log in the data directory.
+- **Failures.** One failing tool does not stop the others. `sync` exits nonzero with a summary if anything failed.
+- **Locking.** Only one `sync` runs at a time on a machine.
+
+```toml
+# tools.toml
+[tools.my-tool]
+url = "git@github.com:you/my-tool.git"
+install = "make install-release"   # absent = pull only
+pull = "stax rs"                   # absent = built-in git fast-forward
+```
 
 | What | Where |
 |---|---|
-| Manifest checkout, managed checkouts, state, logs | `~/.local/share/toolsync/` (macOS: `~/Library/Application Support/toolsync/`) |
-| Machine-local config | `~/.config/toolsync/config.toml` (macOS: `~/Library/Application Support/toolsync/config.toml`) |
+| Tool list | `~/.config/toolsync/tools.toml` (macOS: `~/Library/Application Support/toolsync/tools.toml`) |
+| Managed checkouts, state, logs | `~/.local/share/toolsync/` (macOS: `~/Library/Application Support/toolsync/`) |
 
-Set `TOOLSYNC_HOME` to keep everything, including `config.toml`, in one directory.
-
-## Custom sync command
-
-To sync with a command such as `stax rs` instead of the built-in Git sync, set it in the machine-local config:
-
-```toml
-sync_command = "stax rs"
-
-[tools.some-tool]
-sync_command = ""   # an empty string selects the built-in Git sync
-```
-
-The command runs with `sh -c` inside the managed checkout. A zero exit code is not enough: afterwards the checkout must be clean, on `main`, and at the expected commit, or toolsync reports a sync error and skips the install. Shell aliases and functions are not available to a timer, so use the real binary name.
+Set `TOOLSYNC_HOME` to keep everything, including `tools.toml`, in one directory.
 
 ## Run on a timer
 
-`toolsync apply` is safe to run on a schedule. The timer environment must include `cargo`, `make`, `git`, and any sync command on `PATH`.
+`toolsync sync` is safe to run on a schedule. The timer environment must include `git`, `cargo`, `make`, and any custom commands on `PATH`. Shell aliases and functions are not available to a timer, so use real binary names in custom commands.
 
 **Linux (systemd user timer)**
 
@@ -119,7 +120,7 @@ Description=Sync personal Rust tools
 [Service]
 Type=oneshot
 Environment=PATH=%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.cargo/bin/toolsync apply
+ExecStart=%h/.cargo/bin/toolsync sync
 ```
 
 ```ini
@@ -147,7 +148,7 @@ journalctl --user -u toolsync.service   # logs
 <dict>
   <key>Label</key><string>com.example.toolsync</string>
   <key>ProgramArguments</key>
-  <array><string>/Users/you/.cargo/bin/toolsync</string><string>apply</string></array>
+  <array><string>/Users/you/.cargo/bin/toolsync</string><string>sync</string></array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>/Users/you/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
   <key>StartInterval</key><integer>1800</integer>
@@ -163,7 +164,7 @@ launchctl load ~/Library/LaunchAgents/com.example.toolsync.plist
 
 ## Trust
 
-Enrolling a machine means you trust the manifest and every repo in it: `make install-release` runs code from those repos. toolsync runs as your user and never escalates privileges. The manifest selects a mode only; unknown fields such as commands are rejected.
+The install command runs code from the repo, and custom commands run as you. toolsync never escalates privileges. Only register repos you trust.
 
 ## License
 

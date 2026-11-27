@@ -1,12 +1,11 @@
 mod add;
-mod apply;
-mod config;
 mod git;
-mod manifest;
 mod paths;
 mod remove;
 mod state;
 mod status;
+mod sync;
+mod tools;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -20,25 +19,30 @@ use crate::paths::Paths;
     about = "Keep personal Rust tools synced across machines"
 )]
 struct Cli {
+    /// With no command, runs `sync`
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Enroll this machine by cloning the shared manifest repo
-    Init {
-        /// Git URL of the shared manifest repo
-        manifest_url: String,
-    },
-    /// Register the current repo's remote `main` in the local manifest
+    /// Register the current repo's remote `main` on this machine
     Add {
-        /// Run `make install-release` after each new commit on main
-        #[arg(long, conflicts_with = "pull_only")]
-        install: bool,
-        /// Explicitly switch an existing entry back to pull only
+        /// Install after each new commit on main [default command: make install-release]
+        #[arg(
+            long,
+            value_name = "CMD",
+            num_args = 0..=1,
+            default_missing_value = tools::DEFAULT_INSTALL,
+            conflicts_with = "pull_only"
+        )]
+        install: Option<String>,
+        /// Stop installing an existing entry
         #[arg(long)]
         pull_only: bool,
+        /// Command that updates the checkout (default: built-in git fast-forward; "" resets)
+        #[arg(long, value_name = "CMD")]
+        pull: Option<String>,
         /// Remote to register
         #[arg(long, default_value = "origin")]
         remote: String,
@@ -46,25 +50,16 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Remove a tool from the local manifest
+    /// Stop tracking a tool and delete its managed checkout on this machine
     Remove {
         /// Entry name (defaults to the current repo's entry)
         name: Option<String>,
         /// Remote used to find the current repo's entry
         #[arg(long, default_value = "origin")]
         remote: String,
-        /// Also delete this machine's managed checkout, log, and state
-        #[arg(long)]
-        purge: bool,
     },
-    /// Commit and push local manifest changes
-    Publish {
-        /// Commit message
-        #[arg(short, long, default_value = "Update toolsync manifest")]
-        message: String,
-    },
-    /// Refresh the manifest, sync managed checkouts, and install as needed
-    Apply,
+    /// Pull every registered tool from main and install as needed (the default)
+    Sync,
     /// Show this machine's last known state (no network access)
     Status,
 }
@@ -73,30 +68,23 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::resolve()?;
 
-    match cli.command {
-        Command::Init { manifest_url } => manifest::init(&paths, &manifest_url),
+    match cli.command.unwrap_or(Command::Sync) {
         Command::Add {
             install,
             pull_only,
+            pull,
             remote,
             name,
         } => {
-            let request = if install {
-                add::Request::Install
-            } else if pull_only {
-                add::Request::PullOnly
-            } else {
-                add::Request::Default
+            let changes = add::Changes {
+                install,
+                pull_only,
+                pull,
             };
-            add::run(&paths, &remote, request, name)
+            add::run(&paths, &remote, name, changes)
         }
-        Command::Remove {
-            name,
-            remote,
-            purge,
-        } => remove::run(&paths, name, &remote, purge),
-        Command::Publish { message } => manifest::publish(&paths, &message),
-        Command::Apply => apply::run(&paths),
+        Command::Remove { name, remote } => remove::run(&paths, name, &remote),
+        Command::Sync => sync::run(&paths),
         Command::Status => status::run(&paths),
     }
 }

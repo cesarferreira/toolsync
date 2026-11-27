@@ -3,15 +3,18 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::git;
-use crate::manifest::{self, Manifest, Mode, Tool};
 use crate::paths::Paths;
+use crate::tools::{self, Tool, ToolList};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Request {
-    /// Plain `add`: new entries are pull only; existing entries keep their mode.
-    Default,
-    Install,
-    PullOnly,
+/// What `add` should change. Fields left as `None`/`false` keep an existing entry's value.
+#[derive(Debug, Default)]
+pub struct Changes {
+    /// New install command. An empty string means pull only.
+    pub install: Option<String>,
+    /// Remove the install command.
+    pub pull_only: bool,
+    /// New pull command. An empty string selects the built-in Git sync.
+    pub pull: Option<String>,
 }
 
 /// Root of the repo containing the working directory, and the URL of `remote`.
@@ -25,7 +28,7 @@ pub fn current_repo(remote: &str) -> Result<(PathBuf, String)> {
     Ok((root, url))
 }
 
-pub fn run(paths: &Paths, remote: &str, request: Request, name: Option<String>) -> Result<()> {
+pub fn run(paths: &Paths, remote: &str, name: Option<String>, changes: Changes) -> Result<()> {
     let (root, url) = current_repo(remote)?;
 
     match git::remote_main(Some(&root), remote)? {
@@ -33,9 +36,9 @@ pub fn run(paths: &Paths, remote: &str, request: Request, name: Option<String>) 
         None => bail!("remote `{remote}` ({url}) has no `main` branch; toolsync only tracks main"),
     }
 
-    let mut manifest = Manifest::load(paths)?;
+    let mut list = ToolList::load(paths)?;
 
-    let existing = manifest
+    let existing = list
         .tools
         .iter()
         .find(|(_, tool)| tool.url == url)
@@ -51,8 +54,8 @@ pub fn run(paths: &Paths, remote: &str, request: Request, name: Option<String>) 
                 Some(n) => n,
                 None => name_from_url(&url)?,
             };
-            manifest::validate_name(&name)?;
-            if let Some(other) = manifest.tools.get(&name) {
+            tools::validate_name(&name)?;
+            if let Some(other) = list.tools.get(&name) {
                 bail!(
                     "`{name}` is already used by {}; pass --name to pick another",
                     other.url
@@ -62,42 +65,51 @@ pub fn run(paths: &Paths, remote: &str, request: Request, name: Option<String>) 
         }
     };
 
-    let previous = manifest.tools.get(&name).cloned();
-    let mode = match (request, previous.as_ref().map(|t| t.mode)) {
-        (Request::Install, _) => Mode::Install,
-        (Request::PullOnly, _) => Mode::Pull,
-        (Request::Default, Some(mode)) => mode,
-        (Request::Default, None) => Mode::Pull,
-    };
-    let tool = Tool { url, mode };
+    let previous = list.tools.get(&name).cloned();
+    let mut tool = previous.clone().unwrap_or(Tool {
+        url: url.clone(),
+        install: None,
+        pull: None,
+    });
+    let keeps_install = changes.install.is_none() && !changes.pull_only;
+    if let Some(cmd) = changes.install {
+        tool.install = non_empty(cmd);
+    } else if changes.pull_only {
+        tool.install = None;
+    }
+    if let Some(cmd) = changes.pull {
+        tool.pull = non_empty(cmd);
+    }
 
     match &previous {
         Some(prev) if *prev == tool => {
-            println!("`{name}` is already registered ({})", mode.label());
-            if request == Request::Default && mode == Mode::Install {
-                println!("It keeps `make install-release`; use --pull-only to turn that off.");
+            println!("`{name}` is already registered");
+            print_tool(&tool);
+            if keeps_install && tool.install.is_some() {
+                println!("Use --pull-only to stop installing it.");
             }
             return Ok(());
         }
-        Some(prev) => {
-            println!(
-                "Updated `{name}`: {} -> {}",
-                prev.mode.label(),
-                tool.mode.label()
-            );
-        }
-        None => {
-            println!("Added `{name}`");
-            println!("  url:  {}", tool.url);
-            println!("  mode: {} (tracks main)", tool.mode.label());
-        }
+        Some(_) => println!("Updated `{name}`"),
+        None => println!("Added `{name}` (tracks main)"),
     }
+    print_tool(&tool);
 
-    manifest.tools.insert(name, tool);
-    manifest.save(paths)?;
-    println!("Changed {}", paths.manifest_file().display());
-    println!("Run `toolsync publish` to share it with your other machines.");
+    list.tools.insert(name, tool);
+    list.save(paths)?;
+    println!("Run `toolsync` to pull it now.");
     Ok(())
+}
+
+fn print_tool(tool: &Tool) {
+    println!("  url:     {}", tool.url);
+    println!("  pull:    {}", tool.pull_label());
+    println!("  install: {}", tool.install_label());
+}
+
+fn non_empty(cmd: String) -> Option<String> {
+    let cmd = cmd.trim();
+    (!cmd.is_empty()).then(|| cmd.to_string())
 }
 
 /// `git@github.com:me/my-tool.git` -> `my-tool`

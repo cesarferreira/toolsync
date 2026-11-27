@@ -3,55 +3,45 @@ use std::fs;
 use anyhow::{Context, Result, bail};
 
 use crate::add;
-use crate::apply;
 use crate::git;
-use crate::manifest::{self, Manifest, Mode};
 use crate::paths::Paths;
 use crate::state::State;
+use crate::sync;
+use crate::tools::{self, ToolList};
 
-pub fn run(paths: &Paths, name: Option<String>, remote: &str, purge: bool) -> Result<()> {
-    let mut manifest = Manifest::load(paths)?;
+pub fn run(paths: &Paths, name: Option<String>, remote: &str) -> Result<()> {
+    let mut list = ToolList::load(paths)?;
 
     let name = match name {
         Some(name) => {
-            manifest::validate_name(&name)?;
+            tools::validate_name(&name)?;
             name
         }
         None => {
             let (_, url) = add::current_repo(remote)?;
-            manifest
-                .tools
+            list.tools
                 .iter()
                 .find(|(_, tool)| tool.url == url)
                 .map(|(n, _)| n.clone())
-                .with_context(|| format!("{url} is not in the manifest"))?
+                .with_context(|| format!("{url} is not registered"))?
         }
     };
 
-    let in_manifest = manifest.tools.contains_key(&name);
-    if !in_manifest && !purge {
-        bail!("`{name}` is not in the manifest");
-    }
+    let registered = list.tools.contains_key(&name);
+    let mut had_install = list.tools.get(&name).is_some_and(|t| t.install.is_some());
 
     // Purge first: if the checkout holds local work, nothing changes.
-    let mut had_install = manifest
-        .tools
-        .get(&name)
-        .is_some_and(|t| t.mode == Mode::Install);
-    if purge {
-        let purged = purge_local(paths, &name)?;
-        if !purged.found && !in_manifest {
-            bail!("nothing to remove: `{name}` is not in the manifest or on this machine");
-        }
-        had_install |= purged.had_install;
+    let purged = purge_local(paths, &name)?;
+    if !purged.found && !registered {
+        bail!("`{name}` is not registered on this machine");
     }
+    had_install |= purged.had_install;
 
-    if in_manifest {
-        manifest.tools.remove(&name);
-        manifest.save(paths)?;
-        println!("Removed `{name}` from the manifest");
-        println!("Run `toolsync publish` to share it with your other machines.");
+    if registered {
+        list.tools.remove(&name);
+        list.save(paths)?;
     }
+    println!("Removed `{name}`");
     if had_install {
         println!("toolsync does not uninstall binaries; the last installed build stays on PATH.");
     }
@@ -65,7 +55,7 @@ struct Purged {
 
 /// Delete this machine's managed checkout, install log, and state for `name`.
 fn purge_local(paths: &Paths, name: &str) -> Result<Purged> {
-    let _lock = apply::acquire_lock(paths)?;
+    let _lock = sync::acquire_lock(paths)?;
     let mut purged = Purged {
         found: false,
         had_install: false,

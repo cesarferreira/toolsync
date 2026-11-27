@@ -2,18 +2,18 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 
-use crate::apply::short;
-use crate::manifest::{Manifest, Mode, Tool};
 use crate::paths::Paths;
 use crate::state::{State, ToolState, ago, now};
+use crate::sync::short;
+use crate::tools::{Tool, ToolList};
 
 /// Print this machine's last known state. Reads local files only.
 pub fn run(paths: &Paths) -> Result<()> {
-    let manifest = Manifest::load(paths)?;
+    let list = ToolList::load(paths)?;
     let state = State::load(paths)?;
     let now = now();
 
-    let names: BTreeSet<&String> = manifest.tools.keys().chain(state.tools.keys()).collect();
+    let names: BTreeSet<&String> = list.tools.keys().chain(state.tools.keys()).collect();
     if names.is_empty() {
         println!("No tools registered. Run `toolsync add` inside a repo.");
         return Ok(());
@@ -30,7 +30,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     ]];
     let mut details = Vec::new();
     for name in names {
-        let tool = manifest.tools.get(name);
+        let tool = list.tools.get(name);
         let st = state.tools.get(name).unwrap_or(&empty);
         rows.push([
             name.clone(),
@@ -42,7 +42,7 @@ pub fn run(paths: &Paths) -> Result<()> {
         ]);
         if tool.is_none() {
             details.push(format!(
-                "{name}: removed from the manifest; run `toolsync remove {name} --purge` to delete its local checkout"
+                "{name}: no longer in the tool list; run `toolsync remove {name}` to delete its local checkout"
             ));
         } else if let Some(err) = &st.error {
             details.push(format!("{name}: {}", err.message));
@@ -76,7 +76,7 @@ pub fn run(paths: &Paths) -> Result<()> {
         }
     }
     println!();
-    println!("CHECKED is when remote main was last read; run `toolsync apply` for a live result.");
+    println!("CHECKED is when remote main was last read; run `toolsync sync` for a live result.");
     Ok(())
 }
 
@@ -86,7 +86,7 @@ fn sha(value: &Option<String>) -> String {
 
 fn describe(tool: Option<&Tool>, st: &ToolState) -> String {
     let Some(tool) = tool else {
-        return "not in manifest".into();
+        return "not in tool list".into();
     };
     if let Some(err) = &st.error {
         return err.summary().to_string();
@@ -97,9 +97,11 @@ fn describe(tool: Option<&Tool>, st: &ToolState) -> String {
     if st.remote_main.as_ref() != Some(checkout) {
         return "behind main".into();
     }
-    match tool.mode {
-        Mode::Pull => "synced (pull only)".into(),
-        Mode::Install if st.installed.as_ref() == Some(checkout) => "installed".into(),
-        Mode::Install => "install pending".into(),
+    if tool.install.is_none() {
+        "synced (pull only)".into()
+    } else if st.installed.as_ref() == Some(checkout) {
+        "installed".into()
+    } else {
+        "install pending".into()
     }
 }

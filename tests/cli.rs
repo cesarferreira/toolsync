@@ -1,4 +1,4 @@
-//! End-to-end tests for the MVP acceptance criteria, using local bare repos as remotes.
+//! End-to-end tests using local bare repos as remotes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,23 +41,27 @@ fn text(out: &Output) -> String {
     )
 }
 
+fn short(sha: &str) -> &str {
+    &sha[..7]
+}
+
 impl World {
     fn new() -> Self {
-        let w = Self {
+        Self {
             tmp: TempDir::new().unwrap(),
-        };
-        let manifest = w.path("remotes/manifest.git");
-        fs::create_dir_all(&manifest).unwrap();
-        git(&manifest, &["init", "--quiet", "--bare", "-b", "main"]);
-        w
+        }
     }
 
     fn path(&self, rel: &str) -> PathBuf {
         self.tmp.path().join(rel)
     }
 
-    fn manifest_url(&self) -> String {
-        self.path("remotes/manifest.git").display().to_string()
+    fn home(&self) -> PathBuf {
+        self.path("home")
+    }
+
+    fn checkout(&self, tool: &str) -> PathBuf {
+        self.home().join("repos").join(tool)
     }
 
     fn counter(&self) -> PathBuf {
@@ -68,6 +72,10 @@ impl World {
         fs::read_to_string(self.counter())
             .map(|s| s.lines().count())
             .unwrap_or(0)
+    }
+
+    fn tools_toml(&self) -> String {
+        fs::read_to_string(self.home().join("tools.toml")).unwrap_or_default()
     }
 
     /// A development clone at `dev/<name>` with a bare `origin` at `remotes/<name>.git`.
@@ -97,20 +105,12 @@ impl World {
         git(dev, &["rev-parse", "HEAD"])
     }
 
-    fn home(&self, machine: &str) -> PathBuf {
-        self.path(&format!("machines/{machine}"))
-    }
-
-    fn run(&self, machine: &str, cwd: &Path, args: &[&str]) -> Output {
-        self.run_env(machine, cwd, args, &[])
-    }
-
-    fn run_env(&self, machine: &str, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    fn run_env(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_toolsync"));
         isolate_git(&mut cmd)
             .args(args)
             .current_dir(cwd)
-            .env("TOOLSYNC_HOME", self.home(machine))
+            .env("TOOLSYNC_HOME", self.home())
             .env("INSTALL_COUNTER", self.counter())
             .env_remove("FAIL_INSTALL");
         for (k, v) in env {
@@ -119,44 +119,33 @@ impl World {
         cmd.output().unwrap()
     }
 
-    fn ok(&self, machine: &str, cwd: &Path, args: &[&str]) -> String {
-        let out = self.run(machine, cwd, args);
+    fn run(&self, cwd: &Path, args: &[&str]) -> Output {
+        self.run_env(cwd, args, &[])
+    }
+
+    fn ok(&self, cwd: &Path, args: &[&str]) -> String {
+        let out = self.run(cwd, args);
         assert!(out.status.success(), "{args:?} failed:\n{}", text(&out));
         text(&out)
     }
 
-    fn enroll(&self, machine: &str) {
-        self.ok(machine, self.tmp.path(), &["init", &self.manifest_url()]);
+    fn fails(&self, args: &[&str]) -> String {
+        let out = self.run(self.tmp.path(), args);
+        assert!(!out.status.success(), "{args:?} unexpectedly succeeded");
+        text(&out)
     }
 
-    /// Enroll `machine`, register `dev` with `add_args`, and publish.
-    fn register(&self, machine: &str, dev: &Path, add_args: &[&str]) {
-        self.enroll(machine);
-        let mut args = vec!["add"];
-        args.extend_from_slice(add_args);
-        self.ok(machine, dev, &args);
-        self.ok(machine, dev, &["publish"]);
+    fn sync(&self) -> String {
+        self.ok(self.tmp.path(), &["sync"])
     }
 
-    fn status(&self, machine: &str) -> String {
-        self.ok(machine, self.tmp.path(), &["status"])
-    }
-
-    fn status_line(&self, machine: &str, tool: &str) -> String {
-        self.status(machine)
+    fn status_line(&self, tool: &str) -> String {
+        self.ok(self.tmp.path(), &["status"])
             .lines()
             .find(|l| l.starts_with(&format!("{tool} ")))
             .unwrap_or_else(|| panic!("no status row for {tool}"))
             .to_string()
     }
-
-    fn manifest_text(&self, machine: &str) -> String {
-        fs::read_to_string(self.home(machine).join("manifest/toolsync.toml")).unwrap()
-    }
-}
-
-fn short(sha: &str) -> &str {
-    &sha[..7]
 }
 
 #[test]
@@ -167,16 +156,19 @@ fn add_from_subfolder_on_feature_branch_registers_main_without_touching_checkout
     fs::write(dev.join("src/nested/lib.txt"), "wip\n").unwrap();
     let head_before = git(&dev, &["rev-parse", "HEAD"]);
 
-    w.enroll("a");
-    let out = w.ok("a", &dev.join("src/nested"), &["add", "--install"]);
+    let out = w.ok(&dev.join("src/nested"), &["add", "--install"]);
     assert!(out.contains("Added `my-tool`"), "{out}");
 
-    let manifest = w.manifest_text("a");
-    assert!(manifest.contains("[tools.my-tool]"), "{manifest}");
-    assert!(manifest.contains("my-tool.git"), "{manifest}");
-    assert!(manifest.contains("mode = \"install\""), "{manifest}");
-    assert!(!manifest.contains("feature"), "{manifest}");
-    assert!(!manifest.contains("dev/my-tool"), "{manifest}");
+    let list = w.tools_toml();
+    assert!(list.contains("[tools.my-tool]"), "{list}");
+    assert!(list.contains("my-tool.git"), "{list}");
+    assert!(
+        list.contains("install = \"make install-release\""),
+        "{list}"
+    );
+    assert!(!list.contains("pull"), "{list}");
+    assert!(!list.contains("feature"), "{list}");
+    assert!(!list.contains("dev/my-tool"), "{list}");
 
     assert_eq!(git(&dev, &["branch", "--show-current"]), "feature");
     assert_eq!(git(&dev, &["rev-parse", "HEAD"]), head_before);
@@ -184,31 +176,55 @@ fn add_from_subfolder_on_feature_branch_registers_main_without_touching_checkout
         fs::read_to_string(dev.join("src/nested/lib.txt")).unwrap(),
         "wip\n"
     );
-    // Registration does not publish.
-    assert_eq!(
-        git(&w.home("a").join("manifest"), &["status", "--porcelain"]),
-        "?? toolsync.toml"
-    );
+    // Registration does not pull or install.
+    assert!(!w.checkout("my-tool").exists());
+    assert_eq!(w.installs(), 0);
 }
 
 #[test]
-fn add_is_idempotent_and_never_silently_disables_install() {
+fn add_merges_flags_into_existing_entries() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
-    w.enroll("a");
 
-    w.ok("a", &dev, &["add"]);
-    assert!(w.manifest_text("a").contains("mode = \"pull\""));
+    w.ok(&dev, &["add"]);
+    assert!(!w.tools_toml().contains("install"));
 
-    let out = w.ok("a", &dev, &["add", "--install"]);
-    assert!(out.contains("pull only -> make install-release"), "{out}");
+    w.ok(&dev, &["add", "--install"]);
+    assert!(
+        w.tools_toml()
+            .contains("install = \"make install-release\"")
+    );
 
-    let out = w.ok("a", &dev, &["add"]);
+    // Plain add never silently disables install.
+    let out = w.ok(&dev, &["add"]);
     assert!(out.contains("already registered"), "{out}");
-    assert!(w.manifest_text("a").contains("mode = \"install\""));
+    assert!(out.contains("--pull-only"), "{out}");
+    assert!(
+        w.tools_toml()
+            .contains("install = \"make install-release\"")
+    );
 
-    w.ok("a", &dev, &["add", "--pull-only"]);
-    assert!(w.manifest_text("a").contains("mode = \"pull\""));
+    w.ok(&dev, &["add", "--pull", "stax rs"]);
+    let list = w.tools_toml();
+    assert!(list.contains("pull = \"stax rs\""), "{list}");
+    assert!(
+        list.contains("install = \"make install-release\""),
+        "{list}"
+    );
+
+    w.ok(&dev, &["add", "--install", "cargo install --path ."]);
+    assert!(
+        w.tools_toml()
+            .contains("install = \"cargo install --path .\"")
+    );
+
+    w.ok(&dev, &["add", "--pull-only"]);
+    let list = w.tools_toml();
+    assert!(!list.contains("install"), "{list}");
+    assert!(list.contains("pull = \"stax rs\""), "{list}");
+
+    w.ok(&dev, &["add", "--pull", ""]);
+    assert!(!w.tools_toml().contains("pull"));
 }
 
 #[test]
@@ -221,60 +237,72 @@ fn add_fails_when_remote_has_no_main() {
     git(&dev, &["remote", "add", "other", bare.to_str().unwrap()]);
     git(&dev, &["push", "--quiet", "other", "main:trunk"]);
 
-    w.enroll("a");
-    let out = w.run("a", &dev, &["add", "--remote", "other"]);
+    let out = w.run(&dev, &["add", "--remote", "other"]);
     assert!(!out.status.success());
     assert!(
         text(&out).contains("has no `main` branch"),
         "{}",
         text(&out)
     );
-    assert!(!w.home("a").join("manifest/toolsync.toml").exists());
+    assert!(w.tools_toml().is_empty());
 }
 
 #[test]
-fn second_machine_picks_up_published_entry() {
+fn bare_command_runs_sync() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
-    w.enroll("b"); // enrolled before the entry exists
-    w.register("a", &dev, &["--install"]);
+    w.ok(&dev, &["add", "--install"]);
 
-    let out = w.ok("b", w.tmp.path(), &["apply"]);
+    let out = w.ok(w.tmp.path(), &[]);
     assert!(out.contains("my-tool: installed"), "{out}");
-    let main = git(&dev, &["rev-parse", "main"]);
     assert_eq!(
-        git(&w.home("b").join("repos/my-tool"), &["rev-parse", "HEAD"]),
-        main
+        git(&w.checkout("my-tool"), &["rev-parse", "HEAD"]),
+        git(&dev, &["rev-parse", "main"])
     );
-    assert!(w.status_line("b", "my-tool").contains("installed"));
 }
 
 #[test]
-fn pull_only_entries_never_run_make() {
+fn pull_only_entries_never_install() {
     let w = World::new();
     let dev = w.tool_repo("other-cli");
-    w.register("a", &dev, &[]);
+    w.ok(&dev, &["add"]);
 
-    w.ok("a", w.tmp.path(), &["apply"]);
+    w.sync();
     assert_eq!(w.installs(), 0);
-    let line = w.status_line("a", "other-cli");
+    let line = w.status_line("other-cli");
     assert!(line.contains("synced (pull only)"), "{line}");
     assert!(line.contains("—"), "{line}");
 }
 
 #[test]
-fn second_apply_without_new_commit_does_not_reinstall() {
+fn custom_install_command_runs_in_checkout() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
-    w.register("a", &dev, &["--install"]);
+    w.ok(
+        &dev,
+        &[
+            "add",
+            "--install",
+            "echo custom-$(cat src/nested/lib.txt) >> \"$INSTALL_COUNTER\"",
+        ],
+    );
+    w.sync();
+    assert_eq!(fs::read_to_string(w.counter()).unwrap(), "custom-v1\n");
+}
 
-    w.ok("a", w.tmp.path(), &["apply"]);
-    let out = w.ok("a", w.tmp.path(), &["apply"]);
+#[test]
+fn second_sync_without_new_commit_does_not_reinstall() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    w.ok(&dev, &["add", "--install"]);
+
+    w.sync();
+    let out = w.sync();
     assert!(out.contains("up to date"), "{out}");
     assert_eq!(w.installs(), 1);
 
     w.push_commit(&dev, "v2");
-    w.ok("a", w.tmp.path(), &["apply"]);
+    w.sync();
     assert_eq!(w.installs(), 2);
 }
 
@@ -282,12 +310,12 @@ fn second_apply_without_new_commit_does_not_reinstall() {
 fn failed_install_keeps_previous_sha_and_retries() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
-    w.register("a", &dev, &["--install"]);
-    w.ok("a", w.tmp.path(), &["apply"]);
+    w.ok(&dev, &["add", "--install"]);
+    w.sync();
     let v1 = git(&dev, &["rev-parse", "main"]);
 
     let v2 = w.push_commit(&dev, "v2");
-    let out = w.run_env("a", w.tmp.path(), &["apply"], &[("FAIL_INSTALL", "1")]);
+    let out = w.run_env(w.tmp.path(), &["sync"], &[("FAIL_INSTALL", "1")]);
     assert!(!out.status.success());
     assert!(
         text(&out).contains("install failed; will retry"),
@@ -295,15 +323,15 @@ fn failed_install_keeps_previous_sha_and_retries() {
         text(&out)
     );
 
-    let line = w.status_line("a", "my-tool");
+    let line = w.status_line("my-tool");
     let cols: Vec<&str> = line.split_whitespace().collect();
     assert_eq!(&cols[1..4], &[short(&v2), short(&v2), short(&v1)], "{line}");
     assert!(line.contains("install failed; will retry"), "{line}");
 
     // main has not moved, but the next run retries.
-    w.ok("a", w.tmp.path(), &["apply"]);
+    w.sync();
     assert_eq!(w.installs(), 3);
-    let line = w.status_line("a", "my-tool");
+    let line = w.status_line("my-tool");
     assert!(
         line.contains(&format!("{}  {}", short(&v2), short(&v2))),
         "{line}"
@@ -312,43 +340,35 @@ fn failed_install_keeps_previous_sha_and_retries() {
 }
 
 #[test]
-fn custom_sync_command_must_land_on_main_at_expected_commit() {
+fn custom_pull_command_must_land_on_main_at_expected_commit() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
-    w.register("a", &dev, &["--install"]);
-    w.ok("a", w.tmp.path(), &["apply"]);
+    w.ok(&dev, &["add", "--install"]);
+    w.sync();
     assert_eq!(w.installs(), 1);
 
     // Exits zero but leaves the old commit checked out.
     w.push_commit(&dev, "v2");
-    fs::write(w.home("a").join("config.toml"), "sync_command = \"true\"\n").unwrap();
-    let out = w.run("a", w.tmp.path(), &["apply"]);
-    assert!(!out.status.success());
-    assert!(text(&out).contains("sync error"), "{}", text(&out));
-    assert!(text(&out).contains("expected main at"), "{}", text(&out));
+    w.ok(&dev, &["add", "--pull", "true"]);
+    let out = w.fails(&["sync"]);
+    assert!(out.contains("sync error"), "{out}");
+    assert!(out.contains("expected main at"), "{out}");
     assert_eq!(w.installs(), 1);
 
     // Exits zero but switches branch.
-    fs::write(
-        w.home("a").join("config.toml"),
-        "[tools.my-tool]\nsync_command = \"git checkout -q -b other\"\n",
-    )
-    .unwrap();
-    let out = w.run("a", w.tmp.path(), &["apply"]);
-    assert!(!out.status.success());
-    assert!(text(&out).contains("on other after sync"), "{}", text(&out));
+    w.ok(&dev, &["add", "--pull", "git checkout -q -b other"]);
+    let out = w.fails(&["sync"]);
+    assert!(out.contains("on other after sync"), "{out}");
     assert_eq!(w.installs(), 1);
-    assert!(w.status_line("a", "my-tool").contains("sync error"));
+    assert!(w.status_line("my-tool").contains("sync error"));
 
-    // A command that really syncs main is accepted.
-    let checkout = w.home("a").join("repos/my-tool");
-    git(&checkout, &["checkout", "--quiet", "main"]);
-    fs::write(
-        w.home("a").join("config.toml"),
-        "sync_command = \"git pull -q --ff-only origin main\"\n",
-    )
-    .unwrap();
-    w.ok("a", w.tmp.path(), &["apply"]);
+    // A command that really updates main is accepted.
+    git(&w.checkout("my-tool"), &["checkout", "--quiet", "main"]);
+    w.ok(
+        &dev,
+        &["add", "--pull", "git pull -q --ff-only origin main"],
+    );
+    w.sync();
     assert_eq!(w.installs(), 2);
 }
 
@@ -356,16 +376,15 @@ fn custom_sync_command_must_land_on_main_at_expected_commit() {
 fn dirty_managed_checkout_is_an_error_not_overwritten() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
-    w.register("a", &dev, &[]);
-    w.ok("a", w.tmp.path(), &["apply"]);
+    w.ok(&dev, &["add"]);
+    w.sync();
 
-    let file = w.home("a").join("repos/my-tool/src/nested/lib.txt");
+    let file = w.checkout("my-tool").join("src/nested/lib.txt");
     fs::write(&file, "local edit\n").unwrap();
     w.push_commit(&dev, "v2");
 
-    let out = w.run("a", w.tmp.path(), &["apply"]);
-    assert!(!out.status.success());
-    assert!(text(&out).contains("uncommitted changes"), "{}", text(&out));
+    let out = w.fails(&["sync"]);
+    assert!(out.contains("uncommitted changes"), "{out}");
     assert_eq!(fs::read_to_string(&file).unwrap(), "local edit\n");
 }
 
@@ -373,41 +392,36 @@ fn dirty_managed_checkout_is_an_error_not_overwritten() {
 fn diverged_managed_checkout_is_an_error() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
-    w.register("a", &dev, &[]);
-    w.ok("a", w.tmp.path(), &["apply"]);
+    w.ok(&dev, &["add"]);
+    w.sync();
 
-    let checkout = w.home("a").join("repos/my-tool");
+    let checkout = w.checkout("my-tool");
     fs::write(checkout.join("local.txt"), "x").unwrap();
     git(&checkout, &["add", "."]);
     git(&checkout, &["commit", "--quiet", "-m", "local"]);
     w.push_commit(&dev, "v2");
 
-    let out = w.run("a", w.tmp.path(), &["apply"]);
-    assert!(!out.status.success());
-    assert!(text(&out).contains("diverged"), "{}", text(&out));
+    let out = w.fails(&["sync"]);
+    assert!(out.contains("diverged"), "{out}");
 }
 
 #[test]
-fn offline_run_reports_refresh_failure_and_keeps_last_known_state() {
+fn offline_sync_reports_refresh_failure_and_keeps_last_known_state() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
     let other = w.tool_repo("other-cli");
-    w.register("a", &dev, &["--install"]);
-    w.ok("a", &other, &["add"]);
-    w.ok("a", &other, &["publish"]);
-    w.ok("a", w.tmp.path(), &["apply"]);
+    w.ok(&dev, &["add", "--install"]);
+    w.ok(&other, &["add"]);
+    w.sync();
     let v1 = git(&dev, &["rev-parse", "main"]);
 
     // Simulate losing the network for every remote.
     fs::rename(w.path("remotes"), w.path("remotes-offline")).unwrap();
-    let out = w.run("a", w.tmp.path(), &["apply"]);
-    assert!(!out.status.success());
-    let out = text(&out);
-    assert!(out.contains("manifest: couldn't refresh"), "{out}");
+    let out = w.fails(&["sync"]);
     assert!(out.contains("my-tool: couldn't refresh"), "{out}");
     assert!(out.contains("other-cli: couldn't refresh"), "{out}");
 
-    let line = w.status_line("a", "my-tool");
+    let line = w.status_line("my-tool");
     let cols: Vec<&str> = line.split_whitespace().collect();
     assert_eq!(&cols[1..4], &[short(&v1), short(&v1), short(&v1)], "{line}");
     assert!(line.contains("just now"), "{line}");
@@ -418,98 +432,76 @@ fn offline_run_reports_refresh_failure_and_keeps_last_known_state() {
 }
 
 #[test]
-fn apply_refuses_to_overlap_with_a_running_apply() {
+fn sync_refuses_to_overlap_with_a_running_sync() {
     let w = World::new();
-    w.enroll("a");
+    fs::create_dir_all(w.home()).unwrap();
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(w.home("a").join("apply.lock"))
+        .open(w.home().join("sync.lock"))
         .unwrap();
     lock.lock().unwrap();
 
-    let out = w.run("a", w.tmp.path(), &["apply"]);
-    assert!(!out.status.success());
-    assert!(text(&out).contains("already running"), "{}", text(&out));
+    let out = w.fails(&["sync"]);
+    assert!(out.contains("already running"), "{out}");
 }
 
 #[test]
-fn commands_require_enrollment() {
-    let w = World::new();
-    let out = w.run("a", w.tmp.path(), &["status"]);
-    assert!(!out.status.success());
-    assert!(text(&out).contains("toolsync init"), "{}", text(&out));
-}
-
-#[test]
-fn remove_unregisters_and_purge_cleans_up_other_machines() {
+fn remove_from_repo_deletes_entry_and_checkout() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
-    w.register("a", &dev, &["--install"]);
-    w.enroll("b");
-    w.ok("b", w.tmp.path(), &["apply"]);
-    assert_eq!(w.installs(), 1);
+    w.ok(&dev, &["add", "--install"]);
+    w.sync();
+    assert!(w.checkout("my-tool").exists());
 
-    // Remove from inside the repo, without naming it.
-    let out = w.ok("a", &dev.join("src"), &["remove"]);
+    let out = w.ok(&dev.join("src"), &["remove"]);
     assert!(out.contains("Removed `my-tool`"), "{out}");
     assert!(out.contains("does not uninstall"), "{out}");
-    assert!(!w.manifest_text("a").contains("my-tool"));
-    w.ok("a", &dev, &["publish"]);
-
-    // Machine b stops syncing it but keeps its checkout until purged.
-    w.push_commit(&dev, "v2");
-    w.ok("b", w.tmp.path(), &["apply"]);
-    assert_eq!(w.installs(), 1);
-    let status = w.status("b");
-    assert!(status.contains("not in manifest"), "{status}");
+    assert!(!w.tools_toml().contains("my-tool"));
+    assert!(!w.checkout("my-tool").exists());
     assert!(
-        status.contains("toolsync remove my-tool --purge"),
-        "{status}"
+        w.ok(w.tmp.path(), &["status"])
+            .contains("No tools registered")
     );
-    assert!(w.home("b").join("repos/my-tool").exists());
 
-    w.ok("b", w.tmp.path(), &["remove", "my-tool", "--purge"]);
-    assert!(!w.home("b").join("repos/my-tool").exists());
-    assert!(!w.status("b").contains("my-tool"));
-
-    let out = w.run("b", w.tmp.path(), &["remove", "my-tool", "--purge"]);
-    assert!(!out.status.success());
-    assert!(text(&out).contains("nothing to remove"), "{}", text(&out));
+    let out = w.fails(&["remove", "my-tool"]);
+    assert!(out.contains("not registered"), "{out}");
 }
 
 #[test]
-fn remove_purge_refuses_local_work_and_changes_nothing() {
+fn remove_refuses_local_work_and_changes_nothing() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
-    w.register("a", &dev, &[]);
-    w.ok("a", w.tmp.path(), &["apply"]);
-    let checkout = w.home("a").join("repos/my-tool");
+    w.ok(&dev, &["add"]);
+    w.sync();
+    let checkout = w.checkout("my-tool");
 
     fs::write(checkout.join("src/nested/lib.txt"), "edit\n").unwrap();
-    let out = w.run("a", w.tmp.path(), &["remove", "my-tool", "--purge"]);
-    assert!(!out.status.success());
-    assert!(text(&out).contains("uncommitted changes"), "{}", text(&out));
+    let out = w.fails(&["remove", "my-tool"]);
+    assert!(out.contains("uncommitted changes"), "{out}");
 
     git(&checkout, &["commit", "--quiet", "-am", "local"]);
-    let out = w.run("a", w.tmp.path(), &["remove", "my-tool", "--purge"]);
-    assert!(!out.status.success());
-    assert!(
-        text(&out).contains("aren't on its remote"),
-        "{}",
-        text(&out)
-    );
+    let out = w.fails(&["remove", "my-tool"]);
+    assert!(out.contains("aren't on its remote"), "{out}");
 
     assert!(checkout.exists());
-    assert!(w.manifest_text("a").contains("[tools.my-tool]"));
+    assert!(w.tools_toml().contains("[tools.my-tool]"));
 }
 
 #[test]
-fn remove_unknown_tool_fails() {
+fn hand_removed_entry_shows_in_status_until_cleaned_up() {
     let w = World::new();
-    w.enroll("a");
-    let out = w.run("a", w.tmp.path(), &["remove", "nope"]);
-    assert!(!out.status.success());
-    assert!(text(&out).contains("not in the manifest"), "{}", text(&out));
+    let dev = w.tool_repo("my-tool");
+    w.ok(&dev, &["add"]);
+    w.sync();
+
+    fs::write(w.home().join("tools.toml"), "").unwrap();
+    let status = w.ok(w.tmp.path(), &["status"]);
+    assert!(status.contains("not in tool list"), "{status}");
+    assert!(status.contains("toolsync remove my-tool"), "{status}");
+
+    w.ok(w.tmp.path(), &["remove", "my-tool"]);
+    assert!(!w.checkout("my-tool").exists());
+    assert!(!w.ok(w.tmp.path(), &["status"]).contains("my-tool"));
 }

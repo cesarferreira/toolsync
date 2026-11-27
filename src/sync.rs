@@ -4,33 +4,26 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::Config;
 use crate::git;
-use crate::manifest::{self, Manifest, Mode, Tool};
 use crate::paths::Paths;
 use crate::state::{ErrorKind, State, ToolError, ToolState, now};
+use crate::tools::{Tool, ToolList};
 
 pub fn run(paths: &Paths) -> Result<()> {
     let _lock = acquire_lock(paths)?;
-    let config = Config::load(paths)?;
     let mut failures = Vec::new();
 
-    if let Err(err) = manifest::refresh(paths) {
-        eprintln!("manifest: couldn't refresh ({err:#}); using the local copy");
-        failures.push("manifest".to_string());
-    }
-
-    let manifest = Manifest::load(paths)?;
+    let list = ToolList::load(paths)?;
     let mut state = State::load(paths)?;
 
-    if manifest.tools.is_empty() {
-        println!("No tools in the manifest. Register one with `toolsync add`.");
+    if list.tools.is_empty() {
+        println!("No tools registered. Run `toolsync add` inside a repo.");
     }
 
-    for (name, tool) in &manifest.tools {
+    for (name, tool) in &list.tools {
         let entry = state.tools.entry(name.clone()).or_default();
         entry.last_run_at = Some(now());
-        match apply_tool(paths, &config, name, tool, entry) {
+        match sync_tool(paths, name, tool, entry) {
             Ok(outcome) => {
                 entry.error = None;
                 println!("{name}: {outcome}");
@@ -50,10 +43,10 @@ pub fn run(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Holds an exclusive lock on the apply lock file until dropped.
-pub struct ApplyLock(#[allow(dead_code)] File);
+/// Holds an exclusive lock on the sync lock file until dropped.
+pub struct SyncLock(#[allow(dead_code)] File);
 
-pub fn acquire_lock(paths: &Paths) -> Result<ApplyLock> {
+pub fn acquire_lock(paths: &Paths) -> Result<SyncLock> {
     fs::create_dir_all(paths.root())
         .with_context(|| format!("creating {}", paths.root().display()))?;
     let file = OpenOptions::new()
@@ -63,17 +56,16 @@ pub fn acquire_lock(paths: &Paths) -> Result<ApplyLock> {
         .open(paths.lock_file())
         .with_context(|| format!("opening {}", paths.lock_file().display()))?;
     match file.try_lock() {
-        Ok(()) => Ok(ApplyLock(file)),
+        Ok(()) => Ok(SyncLock(file)),
         Err(fs::TryLockError::WouldBlock) => {
-            bail!("another `toolsync apply` is already running on this machine")
+            bail!("another `toolsync sync` is already running on this machine")
         }
-        Err(fs::TryLockError::Error(err)) => Err(err).context("locking apply.lock"),
+        Err(fs::TryLockError::Error(err)) => Err(err).context("locking sync.lock"),
     }
 }
 
-fn apply_tool(
+fn sync_tool(
     paths: &Paths,
-    config: &Config,
     name: &str,
     tool: &Tool,
     entry: &mut ToolState,
@@ -92,7 +84,7 @@ fn apply_tool(
     let dir = paths.checkout(name);
     prepare_checkout(&dir, &tool.url).map_err(|e| sync(format!("{e:#}")))?;
 
-    match config.sync_command(name) {
+    match tool.pull.as_deref() {
         None => {
             // Built-in sync fetches again; use that newer observation of main.
             desired = builtin_sync(&dir).map_err(|e| sync(format!("{e:#}")))?;
@@ -105,15 +97,16 @@ fn apply_tool(
     entry.checkout = Some(head.clone());
     verify_checkout(&dir, &head, &desired).map_err(|e| sync(format!("{e:#}")))?;
 
-    if tool.mode == Mode::Pull {
+    let Some(install_cmd) = tool.install.as_deref() else {
         return Ok(format!("synced {} (pull only)", short(&head)));
-    }
+    };
     if entry.installed.as_deref() == Some(head.as_str()) {
         return Ok(format!("up to date ({})", short(&head)));
     }
 
     println!("{name}: installing {} ...", short(&head));
-    install(paths, name, &dir).map_err(|e| ToolError::new(ErrorKind::Install, format!("{e:#}")))?;
+    install(paths, name, &dir, install_cmd)
+        .map_err(|e| ToolError::new(ErrorKind::Install, format!("{e:#}")))?;
     entry.installed = Some(head.clone());
     entry.installed_at = Some(now());
     Ok(format!("installed {}", short(&head)))
@@ -137,7 +130,7 @@ fn prepare_checkout(dir: &Path, url: &str) -> Result<()> {
         .with_context(|| format!("{} is not a usable Git checkout", dir.display()))?;
     if origin != url {
         bail!(
-            "managed checkout {} follows {origin}, but the manifest says {url}; delete it to re-clone",
+            "managed checkout {} follows {origin}, but the tool list says {url}; delete it to re-clone",
             dir.display()
         );
     }
@@ -181,7 +174,7 @@ fn builtin_sync(dir: &Path) -> Result<String> {
     Ok(target)
 }
 
-fn run_sync_command(dir: &Path, cmd: &str) -> Result<()> {
+fn shell(dir: &Path, cmd: &str) -> Command {
     let mut command = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.args(["/C", cmd]);
@@ -191,13 +184,16 @@ fn run_sync_command(dir: &Path, cmd: &str) -> Result<()> {
         c.args(["-c", cmd]);
         c
     };
-    let status = command
-        .current_dir(dir)
-        .stdin(Stdio::null())
+    command.current_dir(dir).stdin(Stdio::null());
+    command
+}
+
+fn run_sync_command(dir: &Path, cmd: &str) -> Result<()> {
+    let status = shell(dir, cmd)
         .status()
-        .with_context(|| format!("running sync command `{cmd}`"))?;
+        .with_context(|| format!("running pull command `{cmd}`"))?;
     if !status.success() {
-        bail!("sync command `{cmd}` failed ({status})");
+        bail!("pull command `{cmd}` failed ({status})");
     }
     Ok(())
 }
@@ -221,21 +217,18 @@ fn verify_checkout(dir: &Path, head: &str, desired: &str) -> Result<()> {
     ensure_clean(dir)
 }
 
-fn install(paths: &Paths, name: &str, dir: &Path) -> Result<()> {
+fn install(paths: &Paths, name: &str, dir: &Path, cmd: &str) -> Result<()> {
     let log_path = paths.install_log(name);
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)?;
     }
     let log =
         File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
-    let status = Command::new("make")
-        .arg("install-release")
-        .current_dir(dir)
-        .stdin(Stdio::null())
+    let status = shell(dir, cmd)
         .stdout(log.try_clone()?)
         .stderr(log)
         .status()
-        .context("running `make install-release`")?;
+        .with_context(|| format!("running `{cmd}`"))?;
     if status.success() {
         return Ok(());
     }
@@ -246,10 +239,7 @@ fn install(paths: &Paths, name: &str, dir: &Path) -> Result<()> {
     for line in tail {
         eprintln!("  | {line}");
     }
-    bail!(
-        "`make install-release` failed ({status}); log: {}",
-        log_path.display()
-    )
+    bail!("`{cmd}` failed ({status}); log: {}", log_path.display())
 }
 
 pub fn short(sha: &str) -> &str {
