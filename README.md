@@ -58,6 +58,7 @@ Then pull and install everything you registered:
 ```bash
 tsync                    # same as `tsync sync`
 tsync -j 2               # same, at most 2 tools at a time
+tsync --pull             # only pull; skip installs this run
 tsync status             # check every remote in parallel, then show the table
 tsync status --offline   # last known state, no network
 tsync config             # where the tool list and data live
@@ -123,6 +124,7 @@ After any pull, the repo must be clean, on `main`, and at the latest remote comm
 - **In place, no clones.** `sync` pulls and builds in the repo you registered. It only touches a repo that is on `main` with no uncommitted changes. On another branch, with local edits, or with unpushed commits on `main`, the tool is **skipped** (●) and nothing changes. A `main` that has diverged from the remote is an error. If you move a repo, run `tsync add` in its new location.
 - **Built-in pull.** Fetches `main` from the remote whose URL matches the entry, then fast-forwards. It never merges, rebases, or switches branches.
 - **Installs.** The install command runs when remote `main` differs from the last successful install. A failed install keeps the previous SHA, and the next run retries it. Install output goes to a log in the data directory.
+- **Pull without installing.** `tsync --pull` pulls every tool but runs no installs. `status` then shows `install pending`, and the next plain `tsync` installs it.
 - **Parallel.** All tools sync at once by default. Use `-j N` to limit how many run together, for example to keep several `cargo install` builds from competing for CPU.
 - **Failures.** One failing tool does not stop the others. `sync` exits nonzero with a summary if anything failed.
 - **Locking.** Only one `sync` runs at a time on a machine.

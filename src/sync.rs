@@ -16,7 +16,8 @@ use crate::tools::{Tool, ToolList};
 use crate::ui;
 
 /// Returns `false` when any tool failed; the failures are already reported.
-pub fn run(paths: &Paths, jobs: Option<usize>) -> Result<bool> {
+/// With `install` false, tools are only pulled.
+pub fn run(paths: &Paths, jobs: Option<usize>, install: bool) -> Result<bool> {
     let _lock = acquire_lock(paths)?;
 
     let list = ToolList::load(paths)?;
@@ -35,7 +36,11 @@ pub fn run(paths: &Paths, jobs: Option<usize>) -> Result<bool> {
     let (board, rows) = Board::new(list.tools.keys());
     if board.is_live() {
         board.println(
-            &ui::err_dim(format!("Syncing {total} tool(s), {jobs} at a time")).to_string(),
+            &ui::err_dim(format!(
+                "{} {total} tool(s), {jobs} at a time",
+                if install { "Syncing" } else { "Pulling" }
+            ))
+            .to_string(),
         );
     }
 
@@ -65,7 +70,7 @@ pub fn run(paths: &Paths, jobs: Option<usize>) -> Result<bool> {
                         break;
                     };
                     entry.last_run_at = Some(now());
-                    let result = sync_tool(paths, &name, &tool, &mut entry, &row);
+                    let result = sync_tool(paths, &name, &tool, &mut entry, &row, install);
                     let skipped = matches!(result, Ok(Outcome::Skipped(_)));
                     match &result {
                         Ok(Outcome::Skipped(reason)) => row.skipped(reason),
@@ -162,6 +167,8 @@ enum Outcome {
     /// The repo is on another branch or has local changes; nothing was touched.
     Skipped(String),
     PullOnly(String),
+    /// Pulled, but `--pull` asked not to install this run.
+    InstallSkipped(String),
     UpToDate(String),
     Installed(String),
 }
@@ -174,6 +181,11 @@ impl Outcome {
                 "{} {}",
                 ui::good(format!("synced {}", short(sha))),
                 ui::dim("(pull only)")
+            ),
+            Outcome::InstallSkipped(sha) => format!(
+                "{} {}",
+                ui::good(format!("pulled {}", short(sha))),
+                ui::dim("(install skipped)")
             ),
             Outcome::UpToDate(sha) => format!(
                 "{} {}",
@@ -212,6 +224,7 @@ fn sync_tool(
     tool: &Tool,
     entry: &mut ToolState,
     row: &Row,
+    install_allowed: bool,
 ) -> Result<Outcome, ToolError> {
     let refresh = |msg: String| ToolError::new(ErrorKind::Refresh, msg);
     let sync = |msg: String| ToolError::new(ErrorKind::Sync, msg);
@@ -266,6 +279,9 @@ fn sync_tool(
     };
     if entry.installed.as_deref() == Some(head.as_str()) {
         return Ok(Outcome::UpToDate(head));
+    }
+    if !install_allowed {
+        return Ok(Outcome::InstallSkipped(head));
     }
 
     row.stage(format!(

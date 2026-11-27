@@ -18,12 +18,26 @@ use crate::paths::Paths;
 #[command(
     name = "tsync",
     version,
-    about = "Keep personal Rust tools synced across machines"
+    about = "Keep personal Rust tools synced across machines",
+    args_conflicts_with_subcommands = true
 )]
 struct Cli {
     /// With no command, runs `sync`
     #[command(subcommand)]
     command: Option<Command>,
+
+    #[command(flatten)]
+    sync: SyncArgs,
+}
+
+#[derive(clap::Args, Debug, Default)]
+struct SyncArgs {
+    /// How many tools to sync at once (default: all)
+    #[arg(short, long, value_name = "N")]
+    jobs: Option<usize>,
+    /// Only pull; skip installs this run (the next plain sync installs what's pending)
+    #[arg(long)]
+    pull: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -64,11 +78,7 @@ enum Command {
         remote: String,
     },
     /// Pull every registered tool from main and install as needed (the default)
-    Sync {
-        /// How many tools to sync at once (default: all)
-        #[arg(short, long, value_name = "N")]
-        jobs: Option<usize>,
-    },
+    Sync(SyncArgs),
     /// Show each tool's state, checking remote main for all tools in parallel
     Status {
         /// Show the last known state without contacting remotes
@@ -87,7 +97,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::resolve()?;
 
-    match cli.command.unwrap_or(Command::Sync { jobs: None }) {
+    match cli.command.unwrap_or(Command::Sync(cli.sync)) {
         Command::Add {
             install,
             pull_only,
@@ -105,8 +115,8 @@ fn main() -> Result<()> {
             add::run(&paths, &remote, name, changes)
         }
         Command::Remove { name, remote } => remove::run(&paths, name, &remote),
-        Command::Sync { jobs } => {
-            if !sync::run(&paths, jobs)? {
+        Command::Sync(args) => {
+            if !sync::run(&paths, args.jobs, !args.pull)? {
                 std::process::exit(1);
             }
             Ok(())

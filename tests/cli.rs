@@ -709,3 +709,23 @@ fn config_shows_paths() {
         "{out}"
     );
 }
+
+#[test]
+fn pull_flag_skips_install_until_next_plain_sync() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    w.ok(&dev, &["add", "--install"]);
+    let v2 = w.push_commit(&dev, "v2");
+
+    for args in [&["--pull"][..], &["sync", "--pull"][..]] {
+        let out = w.ok(w.tmp.path(), args);
+        assert!(out.contains("(install skipped)"), "{out}");
+        assert_eq!(w.head(&dev), v2);
+        assert_eq!(w.installs(), 0);
+    }
+    assert!(w.status_line("my-tool").ends_with("install pending"));
+
+    let out = w.ok(w.tmp.path(), &["-j", "1"]);
+    assert!(out.contains("my-tool installed"), "{out}");
+    assert_eq!(w.installs(), 1);
+}
