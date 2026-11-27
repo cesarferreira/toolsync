@@ -115,6 +115,14 @@ impl Row {
         }
     }
 
+    pub fn skipped(&self, reason: &str) {
+        if self.live {
+            self.done(ui::warn("●"), ui::warn(format!("skipped: {reason}")));
+        } else {
+            println!("{} skipped: {reason}", ui::name(&self.name));
+        }
+    }
+
     pub fn failure(&self, summary: &str, message: &str) {
         if self.live {
             let msg = format!(

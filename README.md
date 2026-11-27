@@ -38,7 +38,7 @@ tsync --help
 <a id="quickstart"></a>
 ## Quickstart
 
-Register a tool from any directory inside its repo, on any branch:
+Register a tool from any directory inside its repo, on any branch. tsync remembers that repo and syncs it in place; it never clones anything:
 
 ```bash
 tsync add       # asks how to pull and install; Enter accepts the default
@@ -63,11 +63,12 @@ tsync status --offline   # last known state, no network
 tsync config             # where the tool list and data live
 ```
 
-All tools sync in parallel. Each tool gets a live spinner that shows what it is doing, including the latest line of install output, and turns into ✔ or ✖ when it finishes:
+All tools sync in parallel. Each tool gets a live spinner that shows what it is doing, including the latest line of install output, and turns into ✔, ● (skipped) or ✖ when it finishes:
 
 ```text
-Syncing 3 tool(s), 3 at a time
+Syncing 4 tool(s), 4 at a time
 ✖ broken-cli    1.1s  install failed; will retry
+● space         0.2s  skipped: on branch feature-x
 ⠋ stax          1.5s  installing · Compiling anyhow v1.0.0
 ✔ toppy         0.0s  synced aed9b83 (pull only)
 ```
@@ -86,7 +87,7 @@ Checking 3 tool(s)
 Piped or with `--offline`, it prints a table instead:
 
 ```text
-TOOL       MAIN     CHECKOUT  INSTALLED  CHECKED  STATUS
+TOOL       MAIN     LOCAL     INSTALLED  CHECKED  STATUS
 my-tool    a91c2d1  a91c2d1   71ef3b0    4m ago   install failed; will retry
 other-cli  4a92f37  4a92f37   —          4m ago   synced (pull only)
 ```
@@ -99,11 +100,11 @@ Stop tracking a tool:
 tsync remove            # from inside the repo, or `tsync remove <name>`
 ```
 
-`remove` also deletes the managed checkout. It refuses if that checkout has uncommitted changes or unpushed commits. toolsync never uninstalls binaries.
+`remove` only forgets the tool. It never touches the repo and never uninstalls binaries.
 
 ## Custom pull and install commands
 
-Each tool can have its own commands. They run with `sh -c` inside the managed checkout.
+Each tool can have its own commands. They run with `sh -c` inside the tool's repo.
 
 ```bash
 tsync add --install "cargo install --path ."   # custom install command
@@ -114,12 +115,13 @@ tsync add --pull-only                          # stop installing
 
 Flags skip the matching question. `add` never asks when you pass `-y` or when it is not attached to a terminal, so it is safe in scripts. Running `add` again keeps the current settings unless you change them, so it never turns off installing by accident.
 
-After any pull, the checkout must be clean, on `main`, and at the latest remote commit. If not, toolsync reports a sync error and skips the install. A zero exit code is not enough.
+After any pull, the repo must be clean, on `main`, and at the latest remote commit. If not, toolsync reports a sync error and skips the install. A zero exit code is not enough.
 
 ## How it works
 
-- **Tool list.** Each machine keeps its own list in `tools.toml`. Each entry has a repo URL and optional `install` and `pull` commands. It holds no paths or branches, so you can edit it by hand.
-- **Managed checkouts.** `sync` clones each tool into its own checkout, separate from your development clone. The built-in pull fast-forwards `main` only. A dirty or diverged checkout is an error and is never overwritten.
+- **Tool list.** Each machine keeps its own list in `tools.toml`. Each entry has the repo URL, the repo's path on this machine, and optional `install` and `pull` commands. You can edit it by hand.
+- **In place, no clones.** `sync` pulls and builds in the repo you registered. It only touches a repo that is on `main` with no uncommitted changes. On another branch, with local edits, or with unpushed commits on `main`, the tool is **skipped** (●) and nothing changes. A `main` that has diverged from the remote is an error. If you move a repo, run `tsync add` in its new location.
+- **Built-in pull.** Fetches `main` from the remote whose URL matches the entry, then fast-forwards. It never merges, rebases, or switches branches.
 - **Installs.** The install command runs when remote `main` differs from the last successful install. A failed install keeps the previous SHA, and the next run retries it. Install output goes to a log in the data directory.
 - **Parallel.** All tools sync at once by default. Use `-j N` to limit how many run together, for example to keep several `cargo install` builds from competing for CPU.
 - **Failures.** One failing tool does not stop the others. `sync` exits nonzero with a summary if anything failed.
@@ -129,6 +131,7 @@ After any pull, the checkout must be clean, on `main`, and at the latest remote 
 # tools.toml
 [tools.my-tool]
 url = "git@github.com:you/my-tool.git"
+path = "/home/you/code/my-tool"
 install = "make install-release"   # absent = pull only
 pull = "stax rs"                   # absent = built-in git fast-forward
 ```
@@ -136,7 +139,7 @@ pull = "stax rs"                   # absent = built-in git fast-forward
 | What | Where |
 |---|---|
 | Tool list | `~/.config/toolsync/tools.toml` (macOS: `~/Library/Application Support/toolsync/tools.toml`) |
-| Managed checkouts, state, logs | `~/.local/share/toolsync/` (macOS: `~/Library/Application Support/toolsync/`) |
+| State, logs | `~/.local/share/toolsync/` (macOS: `~/Library/Application Support/toolsync/`) |
 
 `tsync config` prints these paths for this machine. `tsync config --path` prints only the tool list path, for example `$EDITOR "$(tsync config --path)"`.
 

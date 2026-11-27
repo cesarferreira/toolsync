@@ -42,7 +42,7 @@ enum Command {
         /// Stop installing an existing entry
         #[arg(long)]
         pull_only: bool,
-        /// Command that updates the checkout (default: built-in git fast-forward; "" resets)
+        /// Command that updates the repo (default: built-in git fast-forward; "" resets)
         #[arg(long, value_name = "CMD")]
         pull: Option<String>,
         /// Remote to register
@@ -55,7 +55,7 @@ enum Command {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Stop tracking a tool and delete its managed checkout on this machine
+    /// Stop tracking a tool on this machine (never touches the repo)
     Remove {
         /// Entry name (defaults to the current repo's entry)
         name: Option<String>,
@@ -121,7 +121,6 @@ fn main() -> Result<()> {
                 };
                 let rows = [
                     ("Tool list", paths.tools_file().clone()),
-                    ("Checkouts", paths.root().join("repos")),
                     ("State", paths.state_file()),
                     ("Logs", paths.root().join("logs")),
                 ];

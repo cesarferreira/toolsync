@@ -63,6 +63,16 @@ pub fn remote_main(dir: Option<&Path>, remote: &str) -> Result<Option<String>> {
     }
 }
 
+/// Name of the remote in `dir` whose URL is `url`.
+pub fn remote_for_url(dir: &Path, url: &str) -> Result<Option<String>> {
+    for remote in run(Some(dir), &["remote"])?.lines() {
+        if run(Some(dir), &["remote", "get-url", remote])? == url {
+            return Ok(Some(remote.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 /// Current branch name, or `None` on a detached HEAD.
 pub fn current_branch(dir: &Path) -> Result<Option<String>> {
     let out = output(Some(dir), &["symbolic-ref", "--quiet", "--short", "HEAD"])?;

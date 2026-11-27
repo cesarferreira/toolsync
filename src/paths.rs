@@ -34,10 +34,6 @@ impl Paths {
         &self.tools_file
     }
 
-    pub fn checkout(&self, name: &str) -> PathBuf {
-        self.root.join("repos").join(name)
-    }
-
     pub fn state_file(&self) -> PathBuf {
         self.root.join("state.toml")
     }

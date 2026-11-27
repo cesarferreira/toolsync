@@ -53,6 +53,7 @@ pub fn run(paths: &Paths, jobs: Option<usize>) -> Result<bool> {
 
     let (tx, rx) = mpsc::channel();
     let mut failures: Vec<(String, ToolError)> = Vec::new();
+    let mut skipped = 0;
     thread::scope(|scope| -> Result<()> {
         for _ in 0..jobs {
             let tx = tx.clone();
@@ -65,17 +66,23 @@ pub fn run(paths: &Paths, jobs: Option<usize>) -> Result<bool> {
                     };
                     entry.last_run_at = Some(now());
                     let result = sync_tool(paths, &name, &tool, &mut entry, &row);
+                    let skipped = matches!(result, Ok(Outcome::Skipped(_)));
                     match &result {
+                        Ok(Outcome::Skipped(reason)) => row.skipped(reason),
                         Ok(outcome) => row.success(&outcome.render()),
                         Err(err) => row.failure(err.summary(), &err.message),
                     }
+                    entry.skipped = match &result {
+                        Ok(Outcome::Skipped(reason)) => Some(reason.clone()),
+                        _ => None,
+                    };
                     if let Err(err) = &result
                         && !row.is_live()
                     {
                         print_install_tail(paths, &name, err);
                     }
                     entry.error = result.as_ref().err().cloned();
-                    if tx.send((name, entry, result.err())).is_err() {
+                    if tx.send((name, entry, result.err(), skipped)).is_err() {
                         break;
                     }
                 }
@@ -84,9 +91,10 @@ pub fn run(paths: &Paths, jobs: Option<usize>) -> Result<bool> {
         drop(tx);
 
         // Only this thread touches the state file.
-        for (name, entry, err) in rx {
+        for (name, entry, err, was_skipped) in rx {
             state.tools.insert(name.clone(), entry);
             state.save(paths)?;
+            skipped += usize::from(was_skipped);
             if let Some(err) = err {
                 failures.push((name, err));
             }
@@ -95,7 +103,7 @@ pub fn run(paths: &Paths, jobs: Option<usize>) -> Result<bool> {
     })?;
 
     if board.is_live() {
-        print_summary(&board, paths, total, &mut failures);
+        print_summary(&board, paths, total, skipped, &mut failures);
     } else if !failures.is_empty() {
         let mut names: Vec<&str> = failures.iter().map(|(n, _)| n.as_str()).collect();
         names.sort();
@@ -105,7 +113,13 @@ pub fn run(paths: &Paths, jobs: Option<usize>) -> Result<bool> {
 }
 
 /// After the board finishes, explain each failure and give a one-line total.
-fn print_summary(board: &Board, paths: &Paths, total: usize, failures: &mut [(String, ToolError)]) {
+fn print_summary(
+    board: &Board,
+    paths: &Paths,
+    total: usize,
+    skipped: usize,
+    failures: &mut [(String, ToolError)],
+) {
     failures.sort_by(|a, b| a.0.cmp(&b.0));
     if !failures.is_empty() {
         eprintln!();
@@ -119,8 +133,11 @@ fn print_summary(board: &Board, paths: &Paths, total: usize, failures: &mut [(St
             print_install_tail(paths, name, err);
         }
     }
-    let ok = total - failures.len();
+    let ok = total - failures.len() - skipped;
     let mut line = ui::good(format!("✔ {ok} ok")).to_string();
+    if skipped > 0 {
+        line.push_str(&format!("  {}", ui::warn(format!("● {skipped} skipped"))));
+    }
     if !failures.is_empty() {
         line.push_str(&format!(
             "  {}",
@@ -142,6 +159,8 @@ fn print_install_tail(paths: &Paths, name: &str, err: &ToolError) {
 
 /// What a successful sync did.
 enum Outcome {
+    /// The repo is on another branch or has local changes; nothing was touched.
+    Skipped(String),
     PullOnly(String),
     UpToDate(String),
     Installed(String),
@@ -150,6 +169,7 @@ enum Outcome {
 impl Outcome {
     fn render(&self) -> String {
         match self {
+            Outcome::Skipped(reason) => format!("skipped: {reason}"),
             Outcome::PullOnly(sha) => format!(
                 "{} {}",
                 ui::good(format!("synced {}", short(sha))),
@@ -205,31 +225,41 @@ fn sync_tool(
     entry.remote_main = Some(desired.clone());
     entry.remote_checked_at = Some(now());
 
-    let dir = paths.checkout(name);
-    row.stage(if dir.exists() {
-        "checking managed checkout"
-    } else {
-        "cloning"
-    });
-    prepare_checkout(&dir, &tool.url).map_err(|e| sync(format!("{e:#}")))?;
+    let Some(dir) = tool.path.as_deref() else {
+        return Err(sync(
+            "no local repo recorded; run `tsync add` inside it".into(),
+        ));
+    };
+    row.stage("checking local repo");
+    let remote = local_remote(dir, &tool.url).map_err(|e| sync(format!("{e:#}")))?;
+    if let Some(reason) = skip_reason(dir).map_err(|e| sync(format!("{e:#}")))? {
+        return Ok(Outcome::Skipped(reason));
+    }
 
     match tool.pull.as_deref() {
         None => {
             row.stage("pulling main");
             // Built-in sync fetches again; use that newer observation of main.
-            desired = builtin_sync(&dir).map_err(|e| sync(format!("{e:#}")))?;
+            match builtin_sync(dir, &remote).map_err(|e| sync(format!("{e:#}")))? {
+                Some(target) => desired = target,
+                None => {
+                    return Ok(Outcome::Skipped(format!(
+                        "main has commits that aren't on {remote}"
+                    )));
+                }
+            }
             entry.remote_main = Some(desired.clone());
         }
         Some(cmd) => {
             row.stage(format!("running {}", ui::cmd(cmd)));
-            run_sync_command(&dir, cmd).map_err(|e| sync(format!("{e:#}")))?
+            run_sync_command(dir, cmd).map_err(|e| sync(format!("{e:#}")))?
         }
     }
 
-    row.stage("verifying checkout");
-    let head = git::head(&dir).map_err(|e| sync(format!("{e:#}")))?;
+    row.stage("verifying repo");
+    let head = git::head(dir).map_err(|e| sync(format!("{e:#}")))?;
     entry.checkout = Some(head.clone());
-    verify_checkout(&dir, &head, &desired).map_err(|e| sync(format!("{e:#}")))?;
+    verify_checkout(dir, &head, &desired).map_err(|e| sync(format!("{e:#}")))?;
 
     let Some(install_cmd) = tool.install.as_deref() else {
         return Ok(Outcome::PullOnly(head));
@@ -243,73 +273,66 @@ fn sync_tool(
         ui::warn("installing"),
         ui::dim(short(&head))
     ));
-    install(paths, name, &dir, install_cmd, row)
+    install(paths, name, dir, install_cmd, row)
         .map_err(|e| ToolError::new(ErrorKind::Install, format!("{e:#}")))?;
     entry.installed = Some(head.clone());
     entry.installed_at = Some(now());
     Ok(Outcome::Installed(head))
 }
 
-/// Clone the managed checkout on first use, and make sure an existing one follows `url`.
-fn prepare_checkout(dir: &Path, url: &str) -> Result<()> {
-    if !dir.exists() {
-        if let Some(parent) = dir.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let dir_str = dir.to_string_lossy();
-        git::run(
-            None,
-            &["clone", "--quiet", "--branch", "main", url, &dir_str],
-        )
-        .with_context(|| format!("cloning {url}"))?;
-        return Ok(());
-    }
-    let origin = git::run(Some(dir), &["remote", "get-url", "origin"])
-        .with_context(|| format!("{} is not a usable Git checkout", dir.display()))?;
-    if origin != url {
+/// The remote in the local repo that points at the tool's URL.
+fn local_remote(dir: &Path, url: &str) -> Result<String> {
+    if !dir.join(".git").exists() {
         bail!(
-            "managed checkout {} follows {origin}, but the tool list says {url}; delete it to re-clone",
+            "no Git repo at {}; run `tsync add` from its new location",
             dir.display()
         );
     }
-    ensure_clean(dir)
+    git::remote_for_url(dir, url)?
+        .with_context(|| format!("no remote in {} points to {url}", dir.display()))
+}
+
+/// Sync only touches a repo that is on `main` with no uncommitted changes.
+fn skip_reason(dir: &Path) -> Result<Option<String>> {
+    match git::current_branch(dir)?.as_deref() {
+        Some("main") => {}
+        Some(branch) => return Ok(Some(format!("on branch {branch}"))),
+        None => return Ok(Some("detached HEAD".into())),
+    }
+    if git::is_dirty(dir)? {
+        return Ok(Some("uncommitted changes".into()));
+    }
+    Ok(None)
 }
 
 fn ensure_clean(dir: &Path) -> Result<()> {
     if git::is_dirty(dir)? {
-        bail!(
-            "managed checkout {} has uncommitted changes; toolsync won't overwrite them",
-            dir.display()
-        );
+        bail!("{} has uncommitted changes after sync", dir.display());
     }
     Ok(())
 }
 
-/// Fast-forward `main` to `origin/main`. Returns the new HEAD.
-fn builtin_sync(dir: &Path) -> Result<String> {
-    git::run(Some(dir), &["fetch", "--quiet", "origin", "main"])?;
-    let target = git::run(Some(dir), &["rev-parse", "refs/remotes/origin/main"])?;
-
-    let branch = git::current_branch(dir)?;
-    if branch.as_deref() != Some("main") {
-        bail!(
-            "managed checkout is on {}, expected main",
-            branch.as_deref().unwrap_or("a detached HEAD")
-        );
-    }
+/// Fast-forward `main` to `<remote>/main`. Returns the new HEAD, or `None` when
+/// local `main` is ahead (unpushed commits), which is left alone.
+fn builtin_sync(dir: &Path, remote: &str) -> Result<Option<String>> {
+    git::run(Some(dir), &["fetch", "--quiet", remote, "main"])?;
+    let target = git::run(
+        Some(dir),
+        &["rev-parse", &format!("refs/remotes/{remote}/main")],
+    )?;
 
     let head = git::head(dir)?;
     if head == target {
-        return Ok(target);
+        return Ok(Some(target));
     }
-    if !git::succeeds(Some(dir), &["merge-base", "--is-ancestor", "HEAD", &target])? {
-        bail!(
-            "managed checkout {} has diverged from origin/main; fix or delete it",
-            dir.display()
-        );
+    if git::succeeds(Some(dir), &["merge-base", "--is-ancestor", "HEAD", &target])? {
+        git::run(Some(dir), &["merge", "--ff-only", "--quiet", &target])?;
+        return Ok(Some(target));
     }
-    git::run(Some(dir), &["merge", "--ff-only", "--quiet", &target])?;
-    Ok(target)
+    if git::succeeds(Some(dir), &["merge-base", "--is-ancestor", &target, "HEAD"])? {
+        return Ok(None);
+    }
+    bail!("local main has diverged from {remote}/main; reconcile it by hand")
 }
 
 fn shell(dir: &Path, cmd: &str) -> Command {
@@ -349,18 +372,18 @@ fn run_sync_command(dir: &Path, cmd: &str) -> Result<()> {
     Ok(())
 }
 
-/// A sync only counts when the checkout is clean, on main, and at the expected commit.
+/// A sync only counts when the repo is clean, on main, and at the expected commit.
 fn verify_checkout(dir: &Path, head: &str, desired: &str) -> Result<()> {
     let branch = git::current_branch(dir)?;
     if branch.as_deref() != Some("main") {
         bail!(
-            "checkout is on {} after sync, expected main",
+            "repo is on {} after sync, expected main",
             branch.as_deref().unwrap_or("a detached HEAD")
         );
     }
     if head != desired {
         bail!(
-            "checkout is at {} after sync, expected main at {}",
+            "repo is at {} after sync, expected main at {}",
             short(head),
             short(desired)
         );

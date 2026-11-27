@@ -91,7 +91,7 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
     let mut rows = vec![[
         "TOOL".to_string(),
         "MAIN".into(),
-        "CHECKOUT".into(),
+        "LOCAL".into(),
         "INSTALLED".into(),
         "CHECKED".into(),
         "STATUS".into(),
@@ -114,7 +114,7 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
         tones.push(tone);
         if tool.is_none() {
             details.push(format!(
-                "{}: no longer in the tool list; run {} to delete its local checkout",
+                "{}: no longer in the tool list; run {} to forget it",
                 ui::name(name),
                 ui::cmd(format!("tsync remove {name}"))
             ));
@@ -279,6 +279,9 @@ fn describe(tool: Option<&Tool>, st: &ToolState) -> (String, Tone) {
     };
     if let Some(err) = &st.error {
         return (err.summary().to_string(), Tone::Bad);
+    }
+    if let Some(reason) = &st.skipped {
+        return (format!("skipped: {reason}"), Tone::Warn);
     }
     let Some(checkout) = &st.checkout else {
         return ("not synced yet".into(), Tone::Warn);

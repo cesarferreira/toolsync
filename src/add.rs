@@ -75,9 +75,12 @@ pub fn run(paths: &Paths, remote: &str, name: Option<String>, changes: Changes) 
     let previous = list.tools.get(&name).cloned();
     let mut tool = previous.clone().unwrap_or_else(|| Tool {
         url: url.clone(),
+        path: None,
         install: detect_install(&root),
         pull: None,
     });
+    // Sync works in this repo, so follow it if it moved.
+    tool.path = Some(root.clone());
     let pull_given = changes.pull.is_some();
     let install_given = changes.install.is_some() || changes.pull_only;
     if let Some(cmd) = changes.install {
@@ -113,7 +116,7 @@ pub fn run(paths: &Paths, remote: &str, name: Option<String>, changes: Changes) 
             "{} {} {}",
             ui::good("Added"),
             ui::name(&name),
-            ui::dim("(tracks main)")
+            ui::dim("(syncs main in place)")
         ),
     }
     print_tool(&tool);
@@ -121,11 +124,18 @@ pub fn run(paths: &Paths, remote: &str, name: Option<String>, changes: Changes) 
     list.tools.insert(name, tool);
     list.save(paths)?;
     println!("Run {} to pull it now.", ui::cmd("tsync"));
+    println!(
+        "{}",
+        ui::dim("Sync skips this repo while it is on another branch or has uncommitted changes.")
+    );
     Ok(())
 }
 
 fn print_tool(tool: &Tool) {
     println!("  {}     {}", ui::dim("url:"), tool.url);
+    if let Some(path) = &tool.path {
+        println!("  {}    {}", ui::dim("path:"), path.display());
+    }
     println!(
         "  {}    {}",
         ui::dim("pull:"),

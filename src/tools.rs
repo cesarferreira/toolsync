@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -18,10 +19,13 @@ pub struct ToolList {
 #[serde(deny_unknown_fields)]
 pub struct Tool {
     pub url: String,
+    /// The repo on this machine that sync pulls and builds in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
     /// Shell command that installs the tool. Absent means pull only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install: Option<String>,
-    /// Shell command that updates the checkout. Absent means the built-in Git fast-forward.
+    /// Shell command that updates the repo. Absent means the built-in Git fast-forward.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull: Option<String>,
 }
@@ -64,7 +68,7 @@ impl ToolList {
     }
 }
 
-/// Names become directory names, so keep them boring.
+/// Names become file names, so keep them boring.
 pub fn validate_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && !name.starts_with('.')

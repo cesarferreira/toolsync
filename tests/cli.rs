@@ -60,10 +60,6 @@ impl World {
         self.path("home")
     }
 
-    fn checkout(&self, tool: &str) -> PathBuf {
-        self.home().join("repos").join(tool)
-    }
-
     fn counter(&self) -> PathBuf {
         self.path("install-count")
     }
@@ -96,12 +92,28 @@ impl World {
         dev
     }
 
-    /// Push a new commit to remote main from the dev clone; returns its SHA.
+    /// Push a new commit to `dev`'s remote main from another clone, as if from
+    /// another machine, so `dev` falls behind. Returns the new SHA.
     fn push_commit(&self, dev: &Path, content: &str) -> String {
-        git(dev, &["checkout", "--quiet", "main"]);
-        fs::write(dev.join("src/nested/lib.txt"), content).unwrap();
-        git(dev, &["commit", "--quiet", "-am", content]);
-        git(dev, &["push", "--quiet", "origin", "main"]);
+        let name = dev.file_name().unwrap().to_str().unwrap();
+        let other = self.path(&format!("elsewhere/{name}"));
+        if other.exists() {
+            git(&other, &["pull", "--quiet", "--ff-only", "origin", "main"]);
+        } else {
+            let bare = self.path(&format!("remotes/{name}.git"));
+            fs::create_dir_all(other.parent().unwrap()).unwrap();
+            git(
+                other.parent().unwrap(),
+                &["clone", "--quiet", bare.to_str().unwrap(), name],
+            );
+        }
+        fs::write(other.join("src/nested/lib.txt"), content).unwrap();
+        git(&other, &["commit", "--quiet", "-am", content]);
+        git(&other, &["push", "--quiet", "origin", "main"]);
+        git(&other, &["rev-parse", "HEAD"])
+    }
+
+    fn head(&self, dev: &Path) -> String {
         git(dev, &["rev-parse", "HEAD"])
     }
 
@@ -149,7 +161,7 @@ impl World {
 }
 
 #[test]
-fn add_from_subfolder_on_feature_branch_registers_main_without_touching_checkout() {
+fn add_from_subfolder_on_feature_branch_records_repo_without_touching_it() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
     git(&dev, &["checkout", "--quiet", "-b", "feature"]);
@@ -168,7 +180,11 @@ fn add_from_subfolder_on_feature_branch_registers_main_without_touching_checkout
     );
     assert!(!list.contains("pull"), "{list}");
     assert!(!list.contains("feature"), "{list}");
-    assert!(!list.contains("dev/my-tool"), "{list}");
+    let root = fs::canonicalize(&dev).unwrap();
+    assert!(
+        list.contains(&format!("path = \"{}\"", root.display())),
+        "{list}"
+    );
 
     assert_eq!(git(&dev, &["branch", "--show-current"]), "feature");
     assert_eq!(git(&dev, &["rev-parse", "HEAD"]), head_before);
@@ -177,7 +193,6 @@ fn add_from_subfolder_on_feature_branch_registers_main_without_touching_checkout
         "wip\n"
     );
     // Registration does not pull or install.
-    assert!(!w.checkout("my-tool").exists());
     assert_eq!(w.installs(), 0);
 }
 
@@ -280,13 +295,13 @@ fn bare_command_runs_sync() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
     w.ok(&dev, &["add", "--install"]);
+    let v2 = w.push_commit(&dev, "v2");
 
     let out = w.ok(w.tmp.path(), &[]);
     assert!(out.contains("my-tool installed"), "{out}");
-    assert_eq!(
-        git(&w.checkout("my-tool"), &["rev-parse", "HEAD"]),
-        git(&dev, &["rev-parse", "main"])
-    );
+    // Pulled in place: no clone anywhere under the data directory.
+    assert_eq!(w.head(&dev), v2);
+    assert!(!w.home().join("repos").exists());
 }
 
 #[test]
@@ -390,8 +405,12 @@ fn custom_pull_command_must_land_on_main_at_expected_commit() {
     assert_eq!(w.installs(), 1);
     assert!(w.status_line("my-tool").contains("sync error"));
 
+    // The repo is now on `other`, so sync leaves it alone.
+    let out = w.sync();
+    assert!(out.contains("my-tool skipped: on branch other"), "{out}");
+
     // A command that really updates main is accepted.
-    git(&w.checkout("my-tool"), &["checkout", "--quiet", "main"]);
+    git(&dev, &["checkout", "--quiet", "main"]);
     w.ok(
         &dev,
         &["add", "--pull", "git pull -q --ff-only origin main"],
@@ -401,36 +420,116 @@ fn custom_pull_command_must_land_on_main_at_expected_commit() {
 }
 
 #[test]
-fn dirty_managed_checkout_is_an_error_not_overwritten() {
+fn repo_on_another_branch_is_skipped_untouched() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
-    w.ok(&dev, &["add"]);
-    w.sync();
-
-    let file = w.checkout("my-tool").join("src/nested/lib.txt");
-    fs::write(&file, "local edit\n").unwrap();
+    w.ok(&dev, &["add", "--install"]);
+    git(&dev, &["checkout", "--quiet", "-b", "feature"]);
+    let before = w.head(&dev);
     w.push_commit(&dev, "v2");
 
-    let out = w.fails(&["sync"]);
-    assert!(out.contains("uncommitted changes"), "{out}");
-    assert_eq!(fs::read_to_string(&file).unwrap(), "local edit\n");
+    let out = w.sync();
+    assert!(out.contains("my-tool skipped: on branch feature"), "{out}");
+    assert_eq!(git(&dev, &["branch", "--show-current"]), "feature");
+    assert_eq!(w.head(&dev), before);
+    assert_eq!(w.installs(), 0);
+    assert!(
+        w.status_line("my-tool")
+            .contains("skipped: on branch feature")
+    );
+
+    // Back on main, the next sync catches up.
+    git(&dev, &["checkout", "--quiet", "main"]);
+    let out = w.sync();
+    assert!(out.contains("my-tool installed"), "{out}");
+    assert_eq!(w.installs(), 1);
 }
 
 #[test]
-fn diverged_managed_checkout_is_an_error() {
+fn uncommitted_changes_are_skipped_not_overwritten() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
     w.ok(&dev, &["add"]);
-    w.sync();
+    let before = w.head(&dev);
 
-    let checkout = w.checkout("my-tool");
-    fs::write(checkout.join("local.txt"), "x").unwrap();
-    git(&checkout, &["add", "."]);
-    git(&checkout, &["commit", "--quiet", "-m", "local"]);
+    let file = dev.join("src/nested/lib.txt");
+    fs::write(&file, "local edit\n").unwrap();
+    w.push_commit(&dev, "v2");
+
+    let out = w.sync();
+    assert!(
+        out.contains("my-tool skipped: uncommitted changes"),
+        "{out}"
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), "local edit\n");
+    assert_eq!(w.head(&dev), before);
+}
+
+#[test]
+fn unpushed_commits_on_main_are_skipped() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    w.ok(&dev, &["add"]);
+
+    fs::write(dev.join("local.txt"), "x").unwrap();
+    git(&dev, &["add", "."]);
+    git(&dev, &["commit", "--quiet", "-m", "local"]);
+    let before = w.head(&dev);
+
+    let out = w.sync();
+    assert!(
+        out.contains("skipped: main has commits that aren't on origin"),
+        "{out}"
+    );
+    assert_eq!(w.head(&dev), before);
+}
+
+#[test]
+fn diverged_main_is_an_error() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    w.ok(&dev, &["add"]);
+
+    fs::write(dev.join("local.txt"), "x").unwrap();
+    git(&dev, &["add", "."]);
+    git(&dev, &["commit", "--quiet", "-m", "local"]);
     w.push_commit(&dev, "v2");
 
     let out = w.fails(&["sync"]);
     assert!(out.contains("diverged"), "{out}");
+}
+
+#[test]
+fn moved_repo_is_a_sync_error_until_re_added() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    w.ok(&dev, &["add", "--install"]);
+    let moved = w.path("moved");
+    fs::rename(&dev, &moved).unwrap();
+
+    let out = w.fails(&["sync"]);
+    assert!(out.contains("no Git repo at"), "{out}");
+
+    w.ok(&moved, &["add"]);
+    let out = w.sync();
+    assert!(out.contains("my-tool installed"), "{out}");
+}
+
+#[test]
+fn entry_without_path_asks_to_re_add() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    w.ok(&dev, &["add"]);
+    let list = w.tools_toml();
+    let list: String = list
+        .lines()
+        .filter(|l| !l.starts_with("path"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    fs::write(w.home().join("tools.toml"), list).unwrap();
+
+    let out = w.fails(&["sync"]);
+    assert!(out.contains("run `tsync add` inside it"), "{out}");
 }
 
 #[test]
@@ -484,18 +583,19 @@ fn sync_refuses_to_overlap_with_a_running_sync() {
 }
 
 #[test]
-fn remove_from_repo_deletes_entry_and_checkout() {
+fn remove_from_repo_forgets_entry_and_leaves_repo_alone() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
     w.ok(&dev, &["add", "--install"]);
     w.sync();
-    assert!(w.checkout("my-tool").exists());
+    let head = w.head(&dev);
 
     let out = w.ok(&dev.join("src"), &["remove"]);
     assert!(out.contains("Removed my-tool"), "{out}");
     assert!(out.contains("does not uninstall"), "{out}");
     assert!(!w.tools_toml().contains("my-tool"));
-    assert!(!w.checkout("my-tool").exists());
+    assert_eq!(w.head(&dev), head);
+    assert!(dev.join("Makefile").exists());
     assert!(
         w.ok(w.tmp.path(), &["status"])
             .contains("No tools registered")
@@ -503,26 +603,6 @@ fn remove_from_repo_deletes_entry_and_checkout() {
 
     let out = w.fails(&["remove", "my-tool"]);
     assert!(out.contains("not registered"), "{out}");
-}
-
-#[test]
-fn remove_refuses_local_work_and_changes_nothing() {
-    let w = World::new();
-    let dev = w.tool_repo("my-tool");
-    w.ok(&dev, &["add"]);
-    w.sync();
-    let checkout = w.checkout("my-tool");
-
-    fs::write(checkout.join("src/nested/lib.txt"), "edit\n").unwrap();
-    let out = w.fails(&["remove", "my-tool"]);
-    assert!(out.contains("uncommitted changes"), "{out}");
-
-    git(&checkout, &["commit", "--quiet", "-am", "local"]);
-    let out = w.fails(&["remove", "my-tool"]);
-    assert!(out.contains("aren't on its remote"), "{out}");
-
-    assert!(checkout.exists());
-    assert!(w.tools_toml().contains("[tools.my-tool]"));
 }
 
 #[test]
@@ -538,7 +618,7 @@ fn hand_removed_entry_shows_in_status_until_cleaned_up() {
     assert!(status.contains("tsync remove my-tool"), "{status}");
 
     w.ok(w.tmp.path(), &["remove", "my-tool"]);
-    assert!(!w.checkout("my-tool").exists());
+    assert!(dev.exists());
     assert!(!w.ok(w.tmp.path(), &["status"]).contains("my-tool"));
 }
 

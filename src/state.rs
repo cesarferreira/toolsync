@@ -20,13 +20,16 @@ pub struct ToolState {
     pub remote_main: Option<String>,
     /// Unix time of the last successful remote check.
     pub remote_checked_at: Option<u64>,
-    /// SHA checked out in the managed checkout after the last sync attempt.
+    /// HEAD of the local repo after the last sync that reached it.
     pub checkout: Option<String>,
     /// SHA of the last successful `make install-release`.
     pub installed: Option<String>,
     pub installed_at: Option<u64>,
     pub last_run_at: Option<u64>,
     pub error: Option<ToolError>,
+    /// Why the last sync left the repo alone (another branch, local changes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
