@@ -249,7 +249,10 @@ fn sync_tool(
         return Ok(Outcome::Skipped(reason));
     }
 
+    // Remote main was just read; if the repo already has it, there is nothing to pull.
+    let current = git::head(dir).map_err(|e| sync(format!("{e:#}")))?;
     match tool.pull.as_deref() {
+        _ if current == desired => {}
         None => {
             row.stage("pulling main");
             // Built-in sync fetches again; use that newer observation of main.

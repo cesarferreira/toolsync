@@ -754,3 +754,35 @@ fn status_reads_local_main_from_the_repo() {
     }
     assert!(w.status_line("my-tool").ends_with("install pending"));
 }
+
+#[test]
+fn up_to_date_repo_is_not_pulled() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    let pulls = w.path("pulls");
+    let cmd = format!(
+        "echo pulled >> '{}'; git pull -q --ff-only origin main",
+        pulls.display()
+    );
+    w.ok(&dev, &["add", "--install", "--pull", &cmd]);
+    let count = || {
+        fs::read_to_string(&pulls)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    };
+
+    // dev already has remote main: install, but no pull.
+    let out = w.sync();
+    assert!(out.contains("my-tool installed"), "{out}");
+    assert_eq!(count(), 0);
+    w.sync();
+    assert_eq!(count(), 0);
+
+    // A new commit on the remote is pulled once.
+    let v2 = w.push_commit(&dev, "v2");
+    w.sync();
+    assert_eq!(count(), 1);
+    assert_eq!(w.head(&dev), v2);
+    w.sync();
+    assert_eq!(count(), 1);
+}
