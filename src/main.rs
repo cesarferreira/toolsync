@@ -132,7 +132,7 @@ fn main() -> Result<()> {
                 let rows = [
                     ("Tool list", paths.tools_file().clone()),
                     ("State", paths.state_file()),
-                    ("Logs", paths.root().join("logs")),
+                    ("Logs", paths.logs_dir()),
                 ];
                 for (label, p) in rows {
                     println!(

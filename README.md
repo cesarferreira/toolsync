@@ -104,10 +104,12 @@ install = "make install-release"   # absent = pull only
 pull = "stax rs"                   # absent = built-in git fast-forward
 ```
 
-| What | Linux | macOS |
-|---|---|---|
-| Tool list | `~/.config/toolsync/tools.toml` | `~/Library/Application Support/toolsync/tools.toml` |
-| State, logs | `~/.local/share/toolsync/` | `~/Library/Application Support/toolsync/` |
+| What | Linux and macOS |
+|---|---|
+| Tool list | `~/.config/toolsync/tools.toml` (or `$XDG_CONFIG_HOME/toolsync/`) |
+| State, logs | `~/.local/share/toolsync/` (or `$XDG_DATA_HOME/toolsync/`) |
+
+Earlier versions kept everything in `~/Library/Application Support/toolsync/` on macOS. tsync moves those files to the new locations the first time it runs.
 
 ```bash
 tsync config                         # print these paths for this machine
