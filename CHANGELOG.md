@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-11-27
+
+### 🐛 Bug Fixes
+
+- Keep progress rows short of the terminal edge
+- Status reads each repo's local main
 ## [0.1.0] - 2026-11-27
 
 ### 🚀 Features
