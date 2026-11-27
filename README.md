@@ -26,13 +26,13 @@
 Requires [Rust](https://rustup.rs) **1.100+** and `~/.cargo/bin` on your `PATH`.
 
 ```bash
-cargo install toolsync
+cargo install toolsync   # installs the `tsync` binary
 ```
 
 Verify:
 
 ```bash
-toolsync --help
+tsync --help
 ```
 
 <a id="quickstart"></a>
@@ -41,16 +41,36 @@ toolsync --help
 Register a tool from any directory inside its repo, on any branch:
 
 ```bash
-toolsync add --install     # track remote main and run `make install-release`
-toolsync add               # track remote main, pull only
+tsync add       # asks how to pull and install; Enter accepts the default
+tsync add -y    # accept the defaults without asking
 ```
+
+```text
+✔ How should toolsync pull my-tool? · Built-in git fast-forward
+✔ How should toolsync install my-tool? · Run `make install-release`
+Added my-tool (tracks main)
+```
+
+For a new tool, the default install is `make install-release` when the repo's Makefile has that target, and pull only otherwise. For an existing tool, the defaults are its current settings.
 
 Then pull and install everything you registered:
 
 ```bash
-toolsync          # same as `toolsync sync`
-toolsync status   # last known state (no network)
+tsync          # same as `tsync sync`
+tsync -j 2     # same, at most 2 tools at a time
+tsync status   # last known state (no network)
 ```
+
+All tools sync in parallel. Each tool gets a live spinner that shows what it is doing, including the latest line of install output, and turns into ✔ or ✖ when it finishes:
+
+```text
+Syncing 3 tool(s), 3 at a time
+✖ broken-cli    1.1s  install failed; will retry
+⠋ stax          1.5s  installing · Compiling anyhow v1.0.0
+✔ toppy         0.0s  synced aed9b83 (pull only)
+```
+
+When output is not a terminal (a timer or a pipe), toolsync prints one plain line per tool instead.
 
 ```text
 TOOL       MAIN     CHECKOUT  INSTALLED  CHECKED  STATUS
@@ -63,7 +83,7 @@ other-cli  4a92f37  4a92f37   —          4m ago   synced (pull only)
 Stop tracking a tool:
 
 ```bash
-toolsync remove            # from inside the repo, or `toolsync remove <name>`
+tsync remove            # from inside the repo, or `tsync remove <name>`
 ```
 
 `remove` also deletes the managed checkout. It refuses if that checkout has uncommitted changes or unpushed commits. toolsync never uninstalls binaries.
@@ -73,13 +93,13 @@ toolsync remove            # from inside the repo, or `toolsync remove <name>`
 Each tool can have its own commands. They run with `sh -c` inside the managed checkout.
 
 ```bash
-toolsync add --install "cargo install --path ."   # custom install command
-toolsync add --pull "stax rs"                     # custom pull command
-toolsync add --pull ""                            # back to the built-in git sync
-toolsync add --pull-only                          # stop installing
+tsync add --install "cargo install --path ."   # custom install command
+tsync add --pull "stax rs"                     # custom pull command
+tsync add --pull ""                            # back to the built-in git sync
+tsync add --pull-only                          # stop installing
 ```
 
-Running `add` again only changes the options you pass. A plain `add` never turns off installing.
+Flags skip the matching question. `add` never asks when you pass `-y` or when it is not attached to a terminal, so it is safe in scripts. Running `add` again keeps the current settings unless you change them, so it never turns off installing by accident.
 
 After any pull, the checkout must be clean, on `main`, and at the latest remote commit. If not, toolsync reports a sync error and skips the install. A zero exit code is not enough.
 
@@ -88,6 +108,7 @@ After any pull, the checkout must be clean, on `main`, and at the latest remote 
 - **Tool list.** Each machine keeps its own list in `tools.toml`. Each entry has a repo URL and optional `install` and `pull` commands. It holds no paths or branches, so you can edit it by hand.
 - **Managed checkouts.** `sync` clones each tool into its own checkout, separate from your development clone. The built-in pull fast-forwards `main` only. A dirty or diverged checkout is an error and is never overwritten.
 - **Installs.** The install command runs when remote `main` differs from the last successful install. A failed install keeps the previous SHA, and the next run retries it. Install output goes to a log in the data directory.
+- **Parallel.** All tools sync at once by default. Use `-j N` to limit how many run together, for example to keep several `cargo install` builds from competing for CPU.
 - **Failures.** One failing tool does not stop the others. `sync` exits nonzero with a summary if anything failed.
 - **Locking.** Only one `sync` runs at a time on a machine.
 
@@ -108,7 +129,7 @@ Set `TOOLSYNC_HOME` to keep everything, including `tools.toml`, in one directory
 
 ## Run on a timer
 
-`toolsync sync` is safe to run on a schedule. The timer environment must include `git`, `cargo`, `make`, and any custom commands on `PATH`. Shell aliases and functions are not available to a timer, so use real binary names in custom commands.
+`tsync sync` is safe to run on a schedule. The timer environment must include `git`, `cargo`, `make`, and any custom commands on `PATH`. Shell aliases and functions are not available to a timer, so use real binary names in custom commands.
 
 **Linux (systemd user timer)**
 
@@ -120,7 +141,7 @@ Description=Sync personal Rust tools
 [Service]
 Type=oneshot
 Environment=PATH=%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.cargo/bin/toolsync sync
+ExecStart=%h/.cargo/bin/tsync sync
 ```
 
 ```ini
@@ -148,7 +169,7 @@ journalctl --user -u toolsync.service   # logs
 <dict>
   <key>Label</key><string>com.example.toolsync</string>
   <key>ProgramArguments</key>
-  <array><string>/Users/you/.cargo/bin/toolsync</string><string>sync</string></array>
+  <array><string>/Users/you/.cargo/bin/tsync</string><string>sync</string></array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>/Users/you/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
   <key>StartInterval</key><integer>1800</integer>

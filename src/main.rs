@@ -1,11 +1,13 @@
 mod add;
 mod git;
 mod paths;
+mod progress;
 mod remove;
 mod state;
 mod status;
 mod sync;
 mod tools;
+mod ui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -14,7 +16,7 @@ use crate::paths::Paths;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "toolsync",
+    name = "tsync",
     version,
     about = "Keep personal Rust tools synced across machines"
 )]
@@ -49,6 +51,9 @@ enum Command {
         /// Entry name (defaults to the repo name from the remote URL)
         #[arg(long)]
         name: Option<String>,
+        /// Accept defaults instead of prompting
+        #[arg(short, long)]
+        yes: bool,
     },
     /// Stop tracking a tool and delete its managed checkout on this machine
     Remove {
@@ -59,7 +64,11 @@ enum Command {
         remote: String,
     },
     /// Pull every registered tool from main and install as needed (the default)
-    Sync,
+    Sync {
+        /// How many tools to sync at once (default: all)
+        #[arg(short, long, value_name = "N")]
+        jobs: Option<usize>,
+    },
     /// Show this machine's last known state (no network access)
     Status,
 }
@@ -68,23 +77,30 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::resolve()?;
 
-    match cli.command.unwrap_or(Command::Sync) {
+    match cli.command.unwrap_or(Command::Sync { jobs: None }) {
         Command::Add {
             install,
             pull_only,
             pull,
             remote,
             name,
+            yes,
         } => {
             let changes = add::Changes {
                 install,
                 pull_only,
                 pull,
+                yes,
             };
             add::run(&paths, &remote, name, changes)
         }
         Command::Remove { name, remote } => remove::run(&paths, name, &remote),
-        Command::Sync => sync::run(&paths),
+        Command::Sync { jobs } => {
+            if !sync::run(&paths, jobs)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Command::Status => status::run(&paths),
     }
 }

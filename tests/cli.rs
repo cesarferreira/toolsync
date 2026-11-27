@@ -106,7 +106,7 @@ impl World {
     }
 
     fn run_env(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_toolsync"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tsync"));
         isolate_git(&mut cmd)
             .args(args)
             .current_dir(cwd)
@@ -156,8 +156,8 @@ fn add_from_subfolder_on_feature_branch_registers_main_without_touching_checkout
     fs::write(dev.join("src/nested/lib.txt"), "wip\n").unwrap();
     let head_before = git(&dev, &["rev-parse", "HEAD"]);
 
-    let out = w.ok(&dev.join("src/nested"), &["add", "--install"]);
-    assert!(out.contains("Added `my-tool`"), "{out}");
+    let out = w.ok(&dev.join("src/nested"), &["add"]);
+    assert!(out.contains("Added my-tool"), "{out}");
 
     let list = w.tools_toml();
     assert!(list.contains("[tools.my-tool]"), "{list}");
@@ -186,7 +186,12 @@ fn add_merges_flags_into_existing_entries() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
 
-    w.ok(&dev, &["add"]);
+    w.ok(&dev, &["add", "--pull-only"]);
+    assert!(!w.tools_toml().contains("install"));
+
+    // A plain add keeps an existing entry's settings instead of re-detecting them.
+    let out = w.ok(&dev, &["add"]);
+    assert!(out.contains("already registered"), "{out}");
     assert!(!w.tools_toml().contains("install"));
 
     w.ok(&dev, &["add", "--install"]);
@@ -196,9 +201,8 @@ fn add_merges_flags_into_existing_entries() {
     );
 
     // Plain add never silently disables install.
-    let out = w.ok(&dev, &["add"]);
+    let out = w.ok(&dev, &["add", "--yes"]);
     assert!(out.contains("already registered"), "{out}");
-    assert!(out.contains("--pull-only"), "{out}");
     assert!(
         w.tools_toml()
             .contains("install = \"make install-release\"")
@@ -228,6 +232,30 @@ fn add_merges_flags_into_existing_entries() {
 }
 
 #[test]
+fn new_entry_without_install_target_defaults_to_pull_only() {
+    let w = World::new();
+    let dev = w.tool_repo("other-cli");
+    fs::write(dev.join("Makefile"), "build:\n\tcargo build\n").unwrap();
+    git(&dev, &["commit", "--quiet", "-am", "no install target"]);
+
+    let out = w.ok(&dev, &["add", "-y"]);
+    assert!(out.contains("none (pull only)"), "{out}");
+    assert!(!w.tools_toml().contains("install"));
+}
+
+#[test]
+fn output_has_no_color_codes_when_piped() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    let add = w.ok(&dev, &["add"]);
+    let sync = w.sync();
+    let status = w.ok(w.tmp.path(), &["status"]);
+    for out in [add, sync, status] {
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+    }
+}
+
+#[test]
 fn add_fails_when_remote_has_no_main() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
@@ -254,7 +282,7 @@ fn bare_command_runs_sync() {
     w.ok(&dev, &["add", "--install"]);
 
     let out = w.ok(w.tmp.path(), &[]);
-    assert!(out.contains("my-tool: installed"), "{out}");
+    assert!(out.contains("my-tool installed"), "{out}");
     assert_eq!(
         git(&w.checkout("my-tool"), &["rev-parse", "HEAD"]),
         git(&dev, &["rev-parse", "main"])
@@ -265,7 +293,7 @@ fn bare_command_runs_sync() {
 fn pull_only_entries_never_install() {
     let w = World::new();
     let dev = w.tool_repo("other-cli");
-    w.ok(&dev, &["add"]);
+    w.ok(&dev, &["add", "--pull-only"]);
 
     w.sync();
     assert_eq!(w.installs(), 0);
@@ -418,8 +446,8 @@ fn offline_sync_reports_refresh_failure_and_keeps_last_known_state() {
     // Simulate losing the network for every remote.
     fs::rename(w.path("remotes"), w.path("remotes-offline")).unwrap();
     let out = w.fails(&["sync"]);
-    assert!(out.contains("my-tool: couldn't refresh"), "{out}");
-    assert!(out.contains("other-cli: couldn't refresh"), "{out}");
+    assert!(out.contains("my-tool couldn't refresh"), "{out}");
+    assert!(out.contains("other-cli couldn't refresh"), "{out}");
 
     let line = w.status_line("my-tool");
     let cols: Vec<&str> = line.split_whitespace().collect();
@@ -456,7 +484,7 @@ fn remove_from_repo_deletes_entry_and_checkout() {
     assert!(w.checkout("my-tool").exists());
 
     let out = w.ok(&dev.join("src"), &["remove"]);
-    assert!(out.contains("Removed `my-tool`"), "{out}");
+    assert!(out.contains("Removed my-tool"), "{out}");
     assert!(out.contains("does not uninstall"), "{out}");
     assert!(!w.tools_toml().contains("my-tool"));
     assert!(!w.checkout("my-tool").exists());
@@ -499,9 +527,49 @@ fn hand_removed_entry_shows_in_status_until_cleaned_up() {
     fs::write(w.home().join("tools.toml"), "").unwrap();
     let status = w.ok(w.tmp.path(), &["status"]);
     assert!(status.contains("not in tool list"), "{status}");
-    assert!(status.contains("toolsync remove my-tool"), "{status}");
+    assert!(status.contains("tsync remove my-tool"), "{status}");
 
     w.ok(w.tmp.path(), &["remove", "my-tool"]);
     assert!(!w.checkout("my-tool").exists());
     assert!(!w.ok(w.tmp.path(), &["status"]).contains("my-tool"));
+}
+
+/// Install command that marks `me` as started, then waits up to 3s for `other` to start.
+fn rendezvous(dir: &Path, me: &str, other: &str) -> String {
+    let d = dir.display();
+    format!(
+        "touch '{d}/{me}'; i=0; while [ ! -f '{d}/{other}' ]; do i=$((i+1)); [ $i -gt 30 ] && exit 1; sleep 0.1; done"
+    )
+}
+
+#[test]
+fn sync_runs_tools_in_parallel() {
+    let w = World::new();
+    let marks = w.path("marks");
+    fs::create_dir_all(&marks).unwrap();
+    let a = w.tool_repo("a-tool");
+    let b = w.tool_repo("b-tool");
+    w.ok(&a, &["add", "--install", &rendezvous(&marks, "a", "b")]);
+    w.ok(&b, &["add", "--install", &rendezvous(&marks, "b", "a")]);
+
+    // Each install waits for the other to start, so this only passes when they overlap.
+    let out = w.sync();
+    assert!(out.contains("a-tool installed"), "{out}");
+    assert!(out.contains("b-tool installed"), "{out}");
+}
+
+#[test]
+fn jobs_limits_concurrency() {
+    let w = World::new();
+    let marks = w.path("marks");
+    fs::create_dir_all(&marks).unwrap();
+    let a = w.tool_repo("a-tool");
+    let b = w.tool_repo("b-tool");
+    w.ok(&a, &["add", "--install", &rendezvous(&marks, "a", "b")]);
+    w.ok(&b, &["add", "--install", &rendezvous(&marks, "b", "a")]);
+
+    // One at a time: a-tool gives up waiting, then b-tool finds a-tool's mark.
+    let out = w.fails(&["sync", "--jobs", "1"]);
+    assert!(out.contains("a-tool install failed"), "{out}");
+    assert!(out.contains("b-tool installed"), "{out}");
 }

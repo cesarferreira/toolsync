@@ -8,6 +8,7 @@ use crate::paths::Paths;
 use crate::state::State;
 use crate::sync;
 use crate::tools::{self, ToolList};
+use crate::ui;
 
 pub fn run(paths: &Paths, name: Option<String>, remote: &str) -> Result<()> {
     let mut list = ToolList::load(paths)?;
@@ -41,9 +42,14 @@ pub fn run(paths: &Paths, name: Option<String>, remote: &str) -> Result<()> {
         list.tools.remove(&name);
         list.save(paths)?;
     }
-    println!("Removed `{name}`");
+    println!("{} {}", ui::good("Removed"), ui::name(&name));
     if had_install {
-        println!("toolsync does not uninstall binaries; the last installed build stays on PATH.");
+        println!(
+            "{}",
+            ui::dim(
+                "toolsync does not uninstall binaries; the last installed build stays on PATH."
+            )
+        );
     }
     Ok(())
 }
@@ -82,7 +88,7 @@ fn purge_local(paths: &Paths, name: &str) -> Result<Purged> {
             }
         }
         fs::remove_dir_all(&dir).with_context(|| format!("deleting {}", dir.display()))?;
-        println!("Deleted {}", dir.display());
+        println!("{} {}", ui::dim("Deleted"), ui::dim(dir.display()));
         purged.found = true;
     }
 

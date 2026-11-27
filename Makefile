@@ -52,8 +52,8 @@ run:
 
 # Quick demo
 demo: install
-	@echo "=== toolsync demo ==="
-	toolsync --help
+	@echo "=== tsync demo ==="
+	tsync --help
 
 # Bump version, regenerate CHANGELOG.md, tag, publish, and push (requires cargo-release + git-cliff)
 release:

@@ -1,10 +1,15 @@
-use std::path::PathBuf;
+use std::fs;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use dialoguer::theme::ColorfulTheme;
+use dialoguer::{Input, Select};
 
 use crate::git;
 use crate::paths::Paths;
-use crate::tools::{self, Tool, ToolList};
+use crate::tools::{self, DEFAULT_INSTALL, Tool, ToolList};
+use crate::ui;
 
 /// What `add` should change. Fields left as `None`/`false` keep an existing entry's value.
 #[derive(Debug, Default)]
@@ -15,6 +20,8 @@ pub struct Changes {
     pub pull_only: bool,
     /// New pull command. An empty string selects the built-in Git sync.
     pub pull: Option<String>,
+    /// Accept defaults instead of prompting for settings not given as flags.
+    pub yes: bool,
 }
 
 /// Root of the repo containing the working directory, and the URL of `remote`.
@@ -66,12 +73,13 @@ pub fn run(paths: &Paths, remote: &str, name: Option<String>, changes: Changes) 
     };
 
     let previous = list.tools.get(&name).cloned();
-    let mut tool = previous.clone().unwrap_or(Tool {
+    let mut tool = previous.clone().unwrap_or_else(|| Tool {
         url: url.clone(),
-        install: None,
+        install: detect_install(&root),
         pull: None,
     });
-    let keeps_install = changes.install.is_none() && !changes.pull_only;
+    let pull_given = changes.pull.is_some();
+    let install_given = changes.install.is_some() || changes.pull_only;
     if let Some(cmd) = changes.install {
         tool.install = non_empty(cmd);
     } else if changes.pull_only {
@@ -81,30 +89,139 @@ pub fn run(paths: &Paths, remote: &str, name: Option<String>, changes: Changes) 
         tool.pull = non_empty(cmd);
     }
 
+    let interactive =
+        !changes.yes && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if interactive && !(pull_given && install_given) {
+        println!("{} {}", ui::bold("Configuring"), ui::name(&name));
+        let theme = ColorfulTheme::default();
+        if !pull_given {
+            tool.pull = prompt_pull(&theme, &name, tool.pull.take())?;
+        }
+        if !install_given {
+            tool.install = prompt_install(&theme, &name, tool.install.take())?;
+        }
+    }
+
     match &previous {
         Some(prev) if *prev == tool => {
-            println!("`{name}` is already registered");
+            println!("{} is already registered", ui::name(&name));
             print_tool(&tool);
-            if keeps_install && tool.install.is_some() {
-                println!("Use --pull-only to stop installing it.");
-            }
             return Ok(());
         }
-        Some(_) => println!("Updated `{name}`"),
-        None => println!("Added `{name}` (tracks main)"),
+        Some(_) => println!("{} {}", ui::good("Updated"), ui::name(&name)),
+        None => println!(
+            "{} {} {}",
+            ui::good("Added"),
+            ui::name(&name),
+            ui::dim("(tracks main)")
+        ),
     }
     print_tool(&tool);
 
     list.tools.insert(name, tool);
     list.save(paths)?;
-    println!("Run `toolsync` to pull it now.");
+    println!("Run {} to pull it now.", ui::cmd("tsync"));
     Ok(())
 }
 
 fn print_tool(tool: &Tool) {
-    println!("  url:     {}", tool.url);
-    println!("  pull:    {}", tool.pull_label());
-    println!("  install: {}", tool.install_label());
+    println!("  {}     {}", ui::dim("url:"), tool.url);
+    println!(
+        "  {}    {}",
+        ui::dim("pull:"),
+        describe(tool.pull.as_deref(), tool.pull_label())
+    );
+    println!(
+        "  {} {}",
+        ui::dim("install:"),
+        describe(tool.install.as_deref(), tool.install_label())
+    );
+}
+
+/// Commands in magenta, built-in behaviour dimmed.
+fn describe(cmd: Option<&str>, label: &str) -> String {
+    match cmd {
+        Some(c) => ui::cmd(c).to_string(),
+        None => ui::dim(label).to_string(),
+    }
+}
+
+/// Default install command for a new entry: `make install-release` when the repo has that target.
+fn detect_install(root: &Path) -> Option<String> {
+    let makefile = fs::read_to_string(root.join("Makefile")).unwrap_or_default();
+    makefile_has_target(&makefile, "install-release").then(|| DEFAULT_INSTALL.to_string())
+}
+
+fn makefile_has_target(makefile: &str, target: &str) -> bool {
+    makefile.lines().any(|line| {
+        line.split_once(':').is_some_and(|(names, rest)| {
+            !rest.starts_with('=') && names.split_whitespace().any(|n| n == target)
+        })
+    })
+}
+
+fn prompt_pull(
+    theme: &ColorfulTheme,
+    name: &str,
+    current: Option<String>,
+) -> Result<Option<String>> {
+    let choices = ["Built-in git fast-forward", "Custom command"];
+    let choice = Select::with_theme(theme)
+        .with_prompt(format!("How should toolsync pull {name}?"))
+        .items(choices)
+        .default(usize::from(current.is_some()))
+        .interact()?;
+    if choice == 0 {
+        return Ok(None);
+    }
+    prompt_command(theme, "Pull command", current).map(Some)
+}
+
+fn prompt_install(
+    theme: &ColorfulTheme,
+    name: &str,
+    current: Option<String>,
+) -> Result<Option<String>> {
+    let choices = [
+        format!("Run `{DEFAULT_INSTALL}`"),
+        "Custom command".to_string(),
+        "Don't install (pull only)".to_string(),
+    ];
+    let default = match current.as_deref() {
+        Some(DEFAULT_INSTALL) => 0,
+        Some(_) => 1,
+        None => 2,
+    };
+    let choice = Select::with_theme(theme)
+        .with_prompt(format!("How should toolsync install {name}?"))
+        .items(&choices)
+        .default(default)
+        .interact()?;
+    match choice {
+        0 => Ok(Some(DEFAULT_INSTALL.to_string())),
+        1 => {
+            let current = current.filter(|c| c != DEFAULT_INSTALL);
+            prompt_command(theme, "Install command", current).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn prompt_command(theme: &ColorfulTheme, prompt: &str, current: Option<String>) -> Result<String> {
+    let mut input = Input::<String>::with_theme(theme).with_prompt(prompt);
+    if let Some(current) = current {
+        input = input.default(current);
+    }
+    let cmd = input
+        .validate_with(|s: &String| {
+            if s.trim().is_empty() {
+                Err("enter a command")
+            } else {
+                Ok(())
+            }
+        })
+        .interact_text()?;
+    Ok(cmd.trim().to_string())
 }
 
 fn non_empty(cmd: String) -> Option<String> {
@@ -129,6 +246,19 @@ fn name_from_url(url: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_makefile_targets() {
+        let mk = "VAR := x\n.PHONY: build install-release\nbuild:\n\tcargo build\ninstall-release: build\n";
+        assert!(makefile_has_target(mk, "install-release"));
+        assert!(makefile_has_target(mk, "build"));
+        assert!(!makefile_has_target(mk, "install"));
+        assert!(!makefile_has_target(
+            "install-release := 1\n",
+            "install-release"
+        ));
+        assert!(!makefile_has_target("", "install-release"));
+    }
 
     #[test]
     fn derives_names_from_urls() {

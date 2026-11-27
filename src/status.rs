@@ -6,6 +6,7 @@ use crate::paths::Paths;
 use crate::state::{State, ToolState, ago, now};
 use crate::sync::short;
 use crate::tools::{Tool, ToolList};
+use crate::ui;
 
 /// Print this machine's last known state. Reads local files only.
 pub fn run(paths: &Paths) -> Result<()> {
@@ -15,7 +16,10 @@ pub fn run(paths: &Paths) -> Result<()> {
 
     let names: BTreeSet<&String> = list.tools.keys().chain(state.tools.keys()).collect();
     if names.is_empty() {
-        println!("No tools registered. Run `toolsync add` inside a repo.");
+        println!(
+            "No tools registered. Run {} inside a repo.",
+            ui::cmd("tsync add")
+        );
         return Ok(());
     }
 
@@ -28,6 +32,7 @@ pub fn run(paths: &Paths) -> Result<()> {
         "CHECKED".into(),
         "STATUS".into(),
     ]];
+    let mut tones = vec![Tone::Good];
     let mut details = Vec::new();
     for name in names {
         let tool = list.tools.get(name);
@@ -38,14 +43,19 @@ pub fn run(paths: &Paths) -> Result<()> {
             sha(&st.checkout),
             sha(&st.installed),
             ago(st.remote_checked_at, now),
-            describe(tool, st),
+            String::new(),
         ]);
+        let (label, tone) = describe(tool, st);
+        rows.last_mut().expect("just pushed")[5] = label;
+        tones.push(tone);
         if tool.is_none() {
             details.push(format!(
-                "{name}: no longer in the tool list; run `toolsync remove {name}` to delete its local checkout"
+                "{}: no longer in the tool list; run {} to delete its local checkout",
+                ui::name(name),
+                ui::cmd(format!("tsync remove {name}"))
             ));
         } else if let Some(err) = &st.error {
-            details.push(format!("{name}: {}", err.message));
+            details.push(format!("{}: {}", ui::name(name), ui::dim(&err.message)));
         }
     }
 
@@ -55,16 +65,23 @@ pub fn run(paths: &Paths) -> Result<()> {
             *w = (*w).max(cell.chars().count());
         }
     }
-    for row in &rows {
+    for (r, (row, tone)) in rows.iter().zip(&tones).enumerate() {
         let mut line = String::new();
         for (i, (cell, w)) in row.iter().zip(widths).enumerate() {
-            if i == row.len() - 1 {
-                line.push_str(cell);
+            // Pad the plain text first so color codes don't break alignment.
+            let padded = if i == row.len() - 1 {
+                cell.clone()
             } else {
-                let pad = w - cell.chars().count();
-                line.push_str(cell);
-                line.push_str(&" ".repeat(pad + 2));
-            }
+                format!("{cell:<w$}  ")
+            };
+            let styled = match (r, i) {
+                (0, _) => ui::bold(padded).to_string(),
+                (_, 0) => ui::name(padded).to_string(),
+                (_, 4) => ui::dim(padded).to_string(),
+                (_, 5) => tone.paint(padded),
+                _ => padded,
+            };
+            line.push_str(&styled);
         }
         println!("{line}");
     }
@@ -76,7 +93,10 @@ pub fn run(paths: &Paths) -> Result<()> {
         }
     }
     println!();
-    println!("CHECKED is when remote main was last read; run `toolsync sync` for a live result.");
+    println!(
+        "{}",
+        ui::dim("CHECKED is when remote main was last read; run `tsync` for a live result.")
+    );
     Ok(())
 }
 
@@ -84,24 +104,41 @@ fn sha(value: &Option<String>) -> String {
     value.as_deref().map(short).unwrap_or("—").to_string()
 }
 
-fn describe(tool: Option<&Tool>, st: &ToolState) -> String {
+#[derive(Clone, Copy)]
+enum Tone {
+    Good,
+    Warn,
+    Bad,
+}
+
+impl Tone {
+    fn paint(self, text: String) -> String {
+        match self {
+            Tone::Good => ui::good(text).to_string(),
+            Tone::Warn => ui::warn(text).to_string(),
+            Tone::Bad => ui::bad(text).to_string(),
+        }
+    }
+}
+
+fn describe(tool: Option<&Tool>, st: &ToolState) -> (String, Tone) {
     let Some(tool) = tool else {
-        return "not in tool list".into();
+        return ("not in tool list".into(), Tone::Warn);
     };
     if let Some(err) = &st.error {
-        return err.summary().to_string();
+        return (err.summary().to_string(), Tone::Bad);
     }
     let Some(checkout) = &st.checkout else {
-        return "not synced yet".into();
+        return ("not synced yet".into(), Tone::Warn);
     };
     if st.remote_main.as_ref() != Some(checkout) {
-        return "behind main".into();
+        return ("behind main".into(), Tone::Warn);
     }
     if tool.install.is_none() {
-        "synced (pull only)".into()
+        ("synced (pull only)".into(), Tone::Good)
     } else if st.installed.as_ref() == Some(checkout) {
-        "installed".into()
+        ("installed".into(), Tone::Good)
     } else {
-        "install pending".into()
+        ("install pending".into(), Tone::Warn)
     }
 }
