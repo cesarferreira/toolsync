@@ -69,8 +69,12 @@ enum Command {
         #[arg(short, long, value_name = "N")]
         jobs: Option<usize>,
     },
-    /// Show this machine's last known state (no network access)
-    Status,
+    /// Show each tool's state, checking remote main for all tools in parallel
+    Status {
+        /// Show the last known state without contacting remotes
+        #[arg(long)]
+        offline: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -101,6 +105,6 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Status => status::run(&paths),
+        Command::Status { offline } => status::run(&paths, offline),
     }
 }

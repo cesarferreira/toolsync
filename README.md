@@ -56,9 +56,10 @@ For a new tool, the default install is `make install-release` when the repo's Ma
 Then pull and install everything you registered:
 
 ```bash
-tsync          # same as `tsync sync`
-tsync -j 2     # same, at most 2 tools at a time
-tsync status   # last known state (no network)
+tsync                    # same as `tsync sync`
+tsync -j 2               # same, at most 2 tools at a time
+tsync status             # check every remote in parallel, then show the table
+tsync status --offline   # last known state, no network
 ```
 
 All tools sync in parallel. Each tool gets a live spinner that shows what it is doing, including the latest line of install output, and turns into ✔ or ✖ when it finishes:
@@ -72,13 +73,15 @@ Syncing 3 tool(s), 3 at a time
 
 When output is not a terminal (a timer or a pipe), toolsync prints one plain line per tool instead.
 
+`tsync status` shows a table:
+
 ```text
 TOOL       MAIN     CHECKOUT  INSTALLED  CHECKED  STATUS
 my-tool    a91c2d1  a91c2d1   71ef3b0    4m ago   install failed; will retry
 other-cli  4a92f37  4a92f37   —          4m ago   synced (pull only)
 ```
 
-`INSTALLED` is the last commit whose install command succeeded on this machine. It does not prove that the binary on `PATH` matches it.
+`status` reads remote `main` for all tools at once, so `MAIN` is live and `behind main` means there is something to pull. If a remote can't be reached, it shows the last known value. `INSTALLED` is the last commit whose install command succeeded on this machine. It does not prove that the binary on `PATH` matches it.
 
 Stop tracking a tool:
 

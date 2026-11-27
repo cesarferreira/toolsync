@@ -1,18 +1,69 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
+use crate::git;
 use crate::paths::Paths;
-use crate::state::{State, ToolState, ago, now};
-use crate::sync::short;
+use crate::state::{ErrorKind, State, ToolError, ToolState, ago, now};
+use crate::sync::{acquire_lock, short};
 use crate::tools::{Tool, ToolList};
 use crate::ui;
 
-/// Print this machine's last known state. Reads local files only.
-pub fn run(paths: &Paths) -> Result<()> {
+/// Print this machine's state. Unless `offline`, first reads remote `main` for
+/// every tool in parallel; local files only otherwise.
+pub fn run(paths: &Paths, offline: bool) -> Result<()> {
     let list = ToolList::load(paths)?;
-    let state = State::load(paths)?;
+    let names: BTreeSet<String> = list.tools.keys().cloned().collect();
+    if names.is_empty() && !paths.state_file().exists() {
+        println!(
+            "No tools registered. Run {} inside a repo.",
+            ui::cmd("tsync add")
+        );
+        return Ok(());
+    }
+
+    // Hold the sync lock while refreshing so a running sync's state is never
+    // overwritten. If a sync is running, show the live result without saving it.
+    let lock = if offline {
+        None
+    } else {
+        acquire_lock(paths).ok()
+    };
+    let mut state = State::load(paths)?;
     let now = now();
+    let mut unreachable = BTreeMap::new();
+    if !offline {
+        for (name, result) in check_remotes(&list) {
+            let st = state.tools.entry(name.clone()).or_default();
+            match result {
+                Ok(sha) => {
+                    st.remote_main = Some(sha);
+                    st.remote_checked_at = Some(now);
+                    if st
+                        .error
+                        .as_ref()
+                        .is_some_and(|e| e.kind == ErrorKind::Refresh)
+                    {
+                        st.error = None;
+                    }
+                }
+                Err(message) => {
+                    if st.error.is_none() {
+                        st.error = Some(ToolError::new(ErrorKind::Refresh, message));
+                    } else {
+                        unreachable.insert(name, message);
+                    }
+                }
+            }
+        }
+        if lock.is_some() {
+            state.save(paths)?;
+        }
+    }
+    drop(lock);
 
     let names: BTreeSet<&String> = list.tools.keys().chain(state.tools.keys()).collect();
     if names.is_empty() {
@@ -57,6 +108,9 @@ pub fn run(paths: &Paths) -> Result<()> {
         } else if let Some(err) = &st.error {
             details.push(format!("{}: {}", ui::name(name), ui::dim(&err.message)));
         }
+        if let Some(message) = unreachable.get(name) {
+            details.push(format!("{}: {}", ui::name(name), ui::dim(message)));
+        }
     }
 
     let mut widths = [0; 6];
@@ -93,11 +147,57 @@ pub fn run(paths: &Paths) -> Result<()> {
         }
     }
     println!();
-    println!(
-        "{}",
-        ui::dim("CHECKED is when remote main was last read; run `tsync` for a live result.")
-    );
+    let footer = if offline {
+        "CHECKED is when remote main was last read; run `tsync status` for a live result."
+    } else {
+        "CHECKED is when remote main was last read; run `tsync` to pull and install."
+    };
+    println!("{}", ui::dim(footer));
     Ok(())
+}
+
+/// Read remote `main` for every tool at once, with a spinner on a terminal.
+fn check_remotes(list: &ToolList) -> Vec<(String, Result<String, String>)> {
+    if list.tools.is_empty() {
+        return Vec::new();
+    }
+    let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner:.cyan} {msg}")
+            .expect("valid template")
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", " "]),
+    );
+    spinner.set_message(
+        ui::dim(format!(
+            "Checking remote main for {} tool(s)",
+            list.tools.len()
+        ))
+        .to_string(),
+    );
+    spinner.enable_steady_tick(Duration::from_millis(80));
+
+    let results = thread::scope(|s| {
+        let handles: Vec<_> = list
+            .tools
+            .iter()
+            .map(|(name, tool)| {
+                s.spawn(move || {
+                    let result = match git::remote_main(None, &tool.url) {
+                        Ok(Some(sha)) => Ok(sha),
+                        Ok(None) => Err(format!("{} has no `main` branch", tool.url)),
+                        Err(err) => Err(format!("{err:#}")),
+                    };
+                    (name.clone(), result)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("remote check thread panicked"))
+            .collect()
+    });
+    spinner.finish_and_clear();
+    results
 }
 
 fn sha(value: &Option<String>) -> String {

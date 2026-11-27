@@ -573,3 +573,34 @@ fn jobs_limits_concurrency() {
     assert!(out.contains("a-tool install failed"), "{out}");
     assert!(out.contains("b-tool installed"), "{out}");
 }
+
+#[test]
+fn status_reads_remote_main_live_and_offline_skips_it() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    let other = w.tool_repo("other-cli");
+    w.ok(&dev, &["add", "--install"]);
+    w.ok(&other, &["add", "--pull-only"]);
+    w.sync();
+    let v1 = git(&dev, &["rev-parse", "main"]);
+    let v2 = w.push_commit(&dev, "v2");
+
+    let offline = w.ok(w.tmp.path(), &["status", "--offline"]);
+    let line = offline.lines().find(|l| l.starts_with("my-tool")).unwrap();
+    assert!(
+        line.contains(short(&v1)) && !line.contains(short(&v2)),
+        "{line}"
+    );
+    assert!(line.ends_with("installed"), "{line}");
+
+    let line = w.status_line("my-tool");
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(&cols[1..4], &[short(&v2), short(&v1), short(&v1)], "{line}");
+    assert!(line.ends_with("behind main"), "{line}");
+    assert!(w.status_line("other-cli").contains("synced (pull only)"));
+
+    // The live result is saved, so --offline now shows it too.
+    let offline = w.ok(w.tmp.path(), &["status", "--offline"]);
+    assert!(offline.contains("behind main"), "{offline}");
+    assert_eq!(w.installs(), 1);
+}
