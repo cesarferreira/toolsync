@@ -109,16 +109,9 @@ impl Row {
         ));
     }
 
-    pub fn success(&self, outcome: &str) {
+    pub fn success(&self, mark: impl std::fmt::Display, outcome: &str) {
         if self.live {
-            let msg = format!(
-                "{} {}  {}  {}",
-                ui::good("✔"),
-                ui::name(format!("{:<w$}", self.name, w = self.width)),
-                ui::dim(elapsed(self.bar.elapsed())),
-                outcome
-            );
-            self.finish(msg);
+            self.done(mark, outcome);
         } else {
             println!("{} {}", ui::name(&self.name), outcome);
         }
@@ -132,21 +125,20 @@ impl Row {
         }
     }
 
-    pub fn failure(&self, summary: &str, message: &str) {
+    pub fn failure(&self, outcome: &str, message: &str) {
         if self.live {
             let msg = format!(
                 "{} {}  {}  {}",
                 ui::err_bad("✖"),
                 ui::err_name(format!("{:<w$}", self.name, w = self.width)),
                 ui::err_dim(elapsed(self.bar.elapsed())),
-                ui::err_bad(summary)
+                outcome
             );
             self.finish(msg);
         } else {
             eprintln!(
-                "{} {} {}",
+                "{} {outcome}: {}",
                 ui::err_name(&self.name),
-                ui::err_bad(format!("{summary}:")),
                 ui::err_dim(message)
             );
         }

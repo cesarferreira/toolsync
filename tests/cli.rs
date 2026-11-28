@@ -298,7 +298,10 @@ fn bare_command_runs_sync() {
     let v2 = w.push_commit(&dev, "v2");
 
     let out = w.ok(w.tmp.path(), &[]);
-    assert!(out.contains("my-tool installed"), "{out}");
+    assert!(
+        out.contains("my-tool pulled +1 commit · installed"),
+        "{out}"
+    );
     // Pulled in place: no clone anywhere under the data directory.
     assert_eq!(w.head(&dev), v2);
     assert!(!w.home().join("repos").exists());
@@ -310,7 +313,8 @@ fn pull_only_entries_never_install() {
     let dev = w.tool_repo("other-cli");
     w.ok(&dev, &["add", "--pull-only"]);
 
-    w.sync();
+    let out = w.sync();
+    assert!(out.contains("other-cli up to date"), "{out}");
     assert_eq!(w.installs(), 0);
     let line = w.status_line("other-cli");
     assert!(line.contains("synced (pull only)"), "{line}");
@@ -360,10 +364,10 @@ fn failed_install_keeps_previous_sha_and_retries() {
     let v2 = w.push_commit(&dev, "v2");
     let out = w.run_env(w.tmp.path(), &["sync"], &[("FAIL_INSTALL", "1")]);
     assert!(!out.status.success());
+    let out = text(&out);
     assert!(
-        text(&out).contains("install failed; will retry"),
-        "{}",
-        text(&out)
+        out.contains("my-tool pulled +1 commit · install failed; will retry"),
+        "{out}"
     );
 
     let line = w.status_line("my-tool");
@@ -372,7 +376,9 @@ fn failed_install_keeps_previous_sha_and_retries() {
     assert!(line.contains("install failed; will retry"), "{line}");
 
     // main has not moved, but the next run retries.
-    w.sync();
+    let out = w.sync();
+    assert!(out.contains("my-tool installed existing checkout"), "{out}");
+    assert!(out.contains("0 pulled (0 commits) · 1 installed"), "{out}");
     assert_eq!(w.installs(), 3);
     let line = w.status_line("my-tool");
     assert!(
@@ -415,8 +421,40 @@ fn custom_pull_command_must_land_on_main_at_expected_commit() {
         &dev,
         &["add", "--pull", "git pull -q --ff-only origin main"],
     );
-    w.sync();
+    let out = w.sync();
+    assert!(
+        out.contains("my-tool pulled +1 commit · installed"),
+        "{out}"
+    );
     assert_eq!(w.installs(), 2);
+}
+
+#[test]
+fn custom_pull_that_replaces_history_reports_checkout_change() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    w.ok(
+        &dev,
+        &[
+            "add",
+            "--pull-only",
+            "--pull",
+            "git fetch -q origin main && git reset -q --hard FETCH_HEAD",
+        ],
+    );
+    let remote_head = w.push_commit(&dev, "remote");
+    git(&dev, &["commit", "--quiet", "--allow-empty", "-m", "local"]);
+
+    let out = w.sync();
+    assert_eq!(w.head(&dev), remote_head);
+    assert!(
+        out.contains("my-tool checkout changed · pull only"),
+        "{out}"
+    );
+    assert!(
+        out.contains("0 pulled (0 commits) · 1 checkout change"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -441,7 +479,10 @@ fn repo_on_another_branch_is_skipped_untouched() {
     // Back on main, the next sync catches up.
     git(&dev, &["checkout", "--quiet", "main"]);
     let out = w.sync();
-    assert!(out.contains("my-tool installed"), "{out}");
+    assert!(
+        out.contains("my-tool pulled +1 commit · installed"),
+        "{out}"
+    );
     assert_eq!(w.installs(), 1);
 }
 
@@ -669,6 +710,39 @@ fn sync_runs_tools_in_parallel() {
 }
 
 #[test]
+fn sync_summarizes_pulls_separately_from_install_results() {
+    let w = World::new();
+    let updated = w.tool_repo("updated");
+    let failed = w.tool_repo("failed");
+    let current = w.tool_repo("current");
+    let busy = w.tool_repo("busy");
+    w.ok(&updated, &["add", "--pull-only"]);
+    w.ok(&failed, &["add", "--install", "false"]);
+    w.ok(&current, &["add", "--pull-only"]);
+    w.ok(&busy, &["add", "--pull-only"]);
+    git(&busy, &["checkout", "--quiet", "-b", "feature"]);
+    w.push_commit(&updated, "v2");
+    w.push_commit(&updated, "v3");
+    w.push_commit(&failed, "v2");
+
+    let out = w.fails(&["sync"]);
+    assert!(
+        out.contains("updated pulled +2 commits · pull only"),
+        "{out}"
+    );
+    assert!(
+        out.contains("failed pulled +1 commit · install failed"),
+        "{out}"
+    );
+    assert!(out.contains("current up to date"), "{out}");
+    assert!(out.contains("busy skipped: on branch feature"), "{out}");
+    assert!(
+        out.contains("2 pulled (3 commits) · 1 up to date · 1 skipped · 1 install failed"),
+        "{out}"
+    );
+}
+
+#[test]
 fn jobs_limits_concurrency() {
     let w = World::new();
     let marks = w.path("marks");
@@ -739,9 +813,12 @@ fn pull_flag_skips_install_until_next_plain_sync() {
     w.ok(&dev, &["add", "--install"]);
     let v2 = w.push_commit(&dev, "v2");
 
-    for args in [&["--pull"][..], &["sync", "--pull"][..]] {
+    for (args, expected) in [
+        (&["--pull"][..], "pulled +1 commit · install skipped"),
+        (&["sync", "--pull"][..], "up to date · install skipped"),
+    ] {
         let out = w.ok(w.tmp.path(), args);
-        assert!(out.contains("(install skipped)"), "{out}");
+        assert!(out.contains(expected), "{out}");
         assert_eq!(w.head(&dev), v2);
         assert_eq!(w.installs(), 0);
     }

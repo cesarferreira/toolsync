@@ -48,14 +48,17 @@ tsync
 ```
 
 ```text
-Syncing 4 tool(s), 4 at a time
-✖ broken-cli    1.1s  install failed; will retry
+Syncing 5 tool(s), 5 at a time
+✖ broken-cli    1.1s  pulled +1 commit · install failed; will retry
+✔ markers       0.4s  installed existing checkout (a852d2d)
 ● space         0.2s  skipped: on branch feature-x
-⠋ stax          1.5s  installing - Compiling anyhow v1.0.0
-✔ toppy         0.0s  synced aed9b83 (pull only)
+↑ stax          1.5s  pulled +4 commits · installed (bc5a317)
+· toppy         0.0s  up to date · pull only (aed9b83)
+
+2 pulled (5 commits) · 2 installed · 1 up to date · 1 skipped · 1 install failed
 ```
 
-All tools sync in parallel. Each row shows what the tool is doing, including the latest line of install output. It ends as ✔ (done), ● (skipped) or ✖ (failed). When output isn't a terminal (a timer or a pipe), tsync prints one plain line per tool instead.
+All tools sync in parallel. Each row shows what the tool is doing, including the latest line of install output. The final rows show which checkouts moved, how many commits they gained, and any install result. The totals count pulls and installs separately, so a tool can appear in both. A pipe or timer gets plain output with the same results and totals.
 
 Stop tracking a tool:
 

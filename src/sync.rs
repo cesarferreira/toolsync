@@ -58,7 +58,7 @@ pub fn run(paths: &Paths, jobs: Option<usize>, install: bool) -> Result<bool> {
 
     let (tx, rx) = mpsc::channel();
     let mut failures: Vec<(String, ToolError)> = Vec::new();
-    let mut skipped = 0;
+    let mut summary = Summary::default();
     thread::scope(|scope| -> Result<()> {
         for _ in 0..jobs {
             let tx = tx.clone();
@@ -70,12 +70,20 @@ pub fn run(paths: &Paths, jobs: Option<usize>, install: bool) -> Result<bool> {
                         break;
                     };
                     entry.last_run_at = Some(now());
-                    let result = sync_tool(paths, &name, &tool, &mut entry, &row, install);
-                    let skipped = matches!(result, Ok(Outcome::Skipped(_)));
+                    let mut change = CheckoutChange::Unchanged;
+                    let result =
+                        sync_tool(paths, &name, &tool, &mut entry, &row, install, &mut change);
                     match &result {
-                        Ok(Outcome::Skipped(reason)) => row.skipped(reason),
-                        Ok(outcome) => row.success(&outcome.render()),
-                        Err(err) => row.failure(err.summary(), &err.message),
+                        Ok(outcome) => outcome.show(&row, change),
+                        Err(err) => {
+                            let error = ui::err_bad(err.summary());
+                            let outcome = if change == CheckoutChange::Unchanged {
+                                error.to_string()
+                            } else {
+                                format!("{} · {error}", change.label())
+                            };
+                            row.failure(&outcome, &err.message);
+                        }
                     }
                     entry.skipped = match &result {
                         Ok(Outcome::Skipped(reason)) => Some(reason.clone()),
@@ -87,7 +95,7 @@ pub fn run(paths: &Paths, jobs: Option<usize>, install: bool) -> Result<bool> {
                         print_install_tail(paths, &name, err);
                     }
                     entry.error = result.as_ref().err().cloned();
-                    if tx.send((name, entry, result.err(), skipped)).is_err() {
+                    if tx.send((name, entry, change, result)).is_err() {
                         break;
                     }
                 }
@@ -96,11 +104,11 @@ pub fn run(paths: &Paths, jobs: Option<usize>, install: bool) -> Result<bool> {
         drop(tx);
 
         // Only this thread touches the state file.
-        for (name, entry, err, was_skipped) in rx {
+        for (name, entry, change, result) in rx {
             state.tools.insert(name.clone(), entry);
             state.save(paths)?;
-            skipped += usize::from(was_skipped);
-            if let Some(err) = err {
+            summary.record(change, &result);
+            if let Err(err) = result {
                 failures.push((name, err));
             }
         }
@@ -108,49 +116,27 @@ pub fn run(paths: &Paths, jobs: Option<usize>, install: bool) -> Result<bool> {
     })?;
 
     if board.is_live() {
-        print_summary(&board, paths, total, skipped, &mut failures);
-    } else if !failures.is_empty() {
-        let mut names: Vec<&str> = failures.iter().map(|(n, _)| n.as_str()).collect();
-        names.sort();
-        eprintln!("{} of {total} failed: {}", names.len(), names.join(", "));
+        print_failures(&board, paths, &mut failures);
     }
+    eprintln!("\n{}", summary.render());
     Ok(failures.is_empty())
 }
 
-/// After the board finishes, explain each failure and give a one-line total.
-fn print_summary(
-    board: &Board,
-    paths: &Paths,
-    total: usize,
-    skipped: usize,
-    failures: &mut [(String, ToolError)],
-) {
+fn print_failures(board: &Board, paths: &Paths, failures: &mut [(String, ToolError)]) {
+    if failures.is_empty() {
+        return;
+    }
     failures.sort_by(|a, b| a.0.cmp(&b.0));
-    if !failures.is_empty() {
-        eprintln!();
-        for (name, err) in failures.iter() {
-            eprintln!(
-                "{} {} {}",
-                ui::err_name(format!("{name:<w$}", w = board.width())),
-                ui::err_bad(format!("{}:", err.summary())),
-                ui::err_dim(&err.message)
-            );
-            print_install_tail(paths, name, err);
-        }
-    }
-    let ok = total - failures.len() - skipped;
-    let mut line = ui::good(format!("✔ {ok} ok")).to_string();
-    if skipped > 0 {
-        line.push_str(&format!("  {}", ui::warn(format!("● {skipped} skipped"))));
-    }
-    if !failures.is_empty() {
-        line.push_str(&format!(
-            "  {}",
-            ui::err_bad(format!("✖ {} failed", failures.len()))
-        ));
-    }
     eprintln!();
-    eprintln!("{line}");
+    for (name, err) in failures.iter() {
+        eprintln!(
+            "{} {} {}",
+            ui::err_name(format!("{name:<w$}", w = board.width())),
+            ui::err_bad(format!("{}:", err.summary())),
+            ui::err_dim(&err.message)
+        );
+        print_install_tail(paths, name, err);
+    }
 }
 
 fn print_install_tail(paths: &Paths, name: &str, err: &ToolError) {
@@ -162,37 +148,159 @@ fn print_install_tail(paths: &Paths, name: &str, err: &ToolError) {
     }
 }
 
-/// What a successful sync did.
+#[derive(Default)]
+struct Summary {
+    pulled: usize,
+    commits: usize,
+    changed: usize,
+    installed: usize,
+    up_to_date: usize,
+    skipped: usize,
+    install_failed: usize,
+    sync_failed: usize,
+}
+
+impl Summary {
+    fn record(&mut self, change: CheckoutChange, result: &Result<Outcome, ToolError>) {
+        match change {
+            CheckoutChange::Pulled(count) => {
+                self.pulled += 1;
+                self.commits += count;
+            }
+            CheckoutChange::Changed => self.changed += 1,
+            CheckoutChange::Unchanged => {}
+        }
+        match result {
+            Ok(Outcome::Installed(_)) => self.installed += 1,
+            Ok(Outcome::Skipped(_)) => self.skipped += 1,
+            Ok(_) if change == CheckoutChange::Unchanged => self.up_to_date += 1,
+            Err(err) if err.kind == ErrorKind::Install => self.install_failed += 1,
+            Err(_) => self.sync_failed += 1,
+            Ok(_) => {}
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut parts = vec![
+            ui::good(format!(
+                "{} pulled ({})",
+                self.pulled,
+                commits(self.commits)
+            ))
+            .for_stderr()
+            .to_string(),
+        ];
+        if self.changed > 0 {
+            let noun = if self.changed == 1 {
+                "change"
+            } else {
+                "changes"
+            };
+            parts.push(format!("{} checkout {noun}", self.changed));
+        }
+        if self.installed > 0 {
+            parts.push(format!("{} installed", self.installed));
+        }
+        parts.push(ui::err_dim(format!("{} up to date", self.up_to_date)).to_string());
+        if self.skipped > 0 {
+            parts.push(
+                ui::warn(format!("{} skipped", self.skipped))
+                    .for_stderr()
+                    .to_string(),
+            );
+        }
+        if self.install_failed > 0 {
+            parts.push(ui::err_bad(format!("{} install failed", self.install_failed)).to_string());
+        }
+        if self.sync_failed > 0 {
+            parts.push(ui::err_bad(format!("{} sync failed", self.sync_failed)).to_string());
+        }
+        parts.join(" · ")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckoutChange {
+    Unchanged,
+    Pulled(usize),
+    Changed,
+}
+
+impl CheckoutChange {
+    fn between(dir: &Path, before: Option<&str>, after: &str) -> Self {
+        let Some(before) = before else {
+            return Self::Changed;
+        };
+        if before == after {
+            return Self::Unchanged;
+        }
+
+        // Count the commits only when the old HEAD is part of the new history.
+        // A custom command can replace history, and counting is only for display.
+        let range = format!("{before}...{after}");
+        let count = git::run(Some(dir), &["rev-list", "--left-right", "--count", &range])
+            .ok()
+            .and_then(|counts| counts.strip_prefix("0\t")?.parse::<usize>().ok());
+        match count {
+            Some(count) if count > 0 => Self::Pulled(count),
+            _ => Self::Changed,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Unchanged => "up to date".into(),
+            Self::Pulled(count) => format!("pulled +{}", commits(count)),
+            Self::Changed => "checkout changed".into(),
+        }
+    }
+}
+
+fn commits(count: usize) -> String {
+    let noun = if count == 1 { "commit" } else { "commits" };
+    format!("{count} {noun}")
+}
+
 enum Outcome {
     /// The repo is on another branch or has local changes; nothing was touched.
     Skipped(String),
     PullOnly(String),
-    /// Pulled, but `--pull` asked not to install this run.
+    /// The checkout is current and `--pull` deferred a pending install.
     InstallSkipped(String),
     UpToDate(String),
     Installed(String),
 }
 
 impl Outcome {
-    fn render(&self) -> String {
-        match self {
-            Outcome::Skipped(reason) => format!("skipped: {reason}"),
-            Outcome::PullOnly(sha) => format!(
-                "{} {}",
-                ui::good(format!("synced {}", short(sha))),
-                ui::dim("(pull only)")
+    fn show(&self, row: &Row, change: CheckoutChange) {
+        let (head, install) = match self {
+            Self::Skipped(reason) => return row.skipped(reason),
+            Self::PullOnly(head) => (head, " · pull only"),
+            Self::InstallSkipped(head) => (head, " · install skipped"),
+            Self::UpToDate(head) => (head, ""),
+            Self::Installed(head) => (head, " · installed"),
+        };
+        let sha = ui::dim(format!("({})", short(head)));
+        let label = change.label();
+        match change {
+            CheckoutChange::Unchanged if matches!(self, Self::Installed(_)) => row.success(
+                ui::good("✔"),
+                &format!("{} {sha}", ui::good("installed existing checkout")),
             ),
-            Outcome::InstallSkipped(sha) => format!(
-                "{} {}",
-                ui::good(format!("pulled {}", short(sha))),
-                ui::dim("(install skipped)")
-            ),
-            Outcome::UpToDate(sha) => format!(
-                "{} {}",
-                ui::good("up to date"),
-                ui::dim(format!("({})", short(sha)))
-            ),
-            Outcome::Installed(sha) => ui::good(format!("installed {}", short(sha))).to_string(),
+            CheckoutChange::Unchanged => {
+                row.success(ui::dim("·"), &format!("{}{install} {sha}", ui::dim(label)));
+            }
+            _ => {
+                let mark = if change == CheckoutChange::Changed {
+                    "↔"
+                } else {
+                    "↑"
+                };
+                row.success(
+                    ui::good(mark),
+                    &format!("{}{install} {sha}", ui::good(label)),
+                );
+            }
         }
     }
 }
@@ -225,6 +333,7 @@ fn sync_tool(
     entry: &mut ToolState,
     row: &Row,
     install_allowed: bool,
+    change: &mut CheckoutChange,
 ) -> Result<Outcome, ToolError> {
     let refresh = |msg: String| ToolError::new(ErrorKind::Refresh, msg);
     let sync = |msg: String| ToolError::new(ErrorKind::Sync, msg);
@@ -286,6 +395,8 @@ fn sync_tool(
             verify_after_pull(dir, entry, &desired, row).map_err(|e| sync(format!("{e:#}")))?
         }
     };
+    // Keep the pull result even if the subsequent install fails.
+    *change = CheckoutChange::between(dir, repo.head.as_deref(), &head);
     entry.checkout = Some(head.clone());
 
     let Some(install_cmd) = tool.install.as_deref() else {
