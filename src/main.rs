@@ -2,6 +2,7 @@ mod add;
 mod git;
 mod paths;
 mod progress;
+mod project;
 mod remove;
 mod state;
 mod status;
@@ -13,6 +14,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::paths::Paths;
+use crate::project::IconStyle;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -38,6 +40,9 @@ struct SyncArgs {
     /// Only pull; skip installs this run (the next plain sync installs what's pending)
     #[arg(long)]
     pull: bool,
+    /// Project icons in terminal output
+    #[arg(long, value_enum, default_value_t)]
+    icons: IconStyle,
 }
 
 #[derive(Subcommand, Debug)]
@@ -84,6 +89,9 @@ enum Command {
         /// Show the last known state without contacting remotes
         #[arg(long)]
         offline: bool,
+        /// Project icons in terminal output
+        #[arg(long, value_enum, default_value_t)]
+        icons: IconStyle,
     },
     /// Show where the tool list and local data live
     Config {
@@ -116,12 +124,12 @@ fn main() -> Result<()> {
         }
         Command::Remove { name, remote } => remove::run(&paths, name, &remote),
         Command::Sync(args) => {
-            if !sync::run(&paths, args.jobs, !args.pull)? {
+            if !sync::run(&paths, args.jobs, !args.pull, args.icons)? {
                 std::process::exit(1);
             }
             Ok(())
         }
-        Command::Status { offline } => status::run(&paths, offline),
+        Command::Status { offline, icons } => status::run(&paths, offline, icons),
         Command::Config { path } => {
             if path {
                 println!("{}", paths.tools_file().display());

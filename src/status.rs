@@ -1,11 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::IsTerminal;
 use std::thread;
 
 use anyhow::Result;
+use console::{Alignment, measure_text_width, pad_str};
 
 use crate::git;
 use crate::paths::Paths;
 use crate::progress::Board;
+use crate::project::IconStyle;
 use crate::state::{ErrorKind, State, ToolError, ToolState, ago, now};
 use crate::sync::{acquire_lock, short};
 use crate::tools::{Tool, ToolList};
@@ -13,7 +16,7 @@ use crate::ui;
 
 /// Print this machine's state. Unless `offline`, first reads remote `main` for
 /// every tool in parallel; local files only otherwise.
-pub fn run(paths: &Paths, offline: bool) -> Result<()> {
+pub fn run(paths: &Paths, offline: bool, icons: IconStyle) -> Result<()> {
     let list = ToolList::load(paths)?;
     let names: BTreeSet<String> = list.tools.keys().cloned().collect();
     if names.is_empty() && !paths.state_file().exists() {
@@ -36,7 +39,7 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
     let mut unreachable = BTreeMap::new();
     let mut live = false;
     if !offline && !list.tools.is_empty() {
-        let (board, rows) = Board::new(list.tools.keys());
+        let (board, rows) = Board::new(&list.tools, icons);
         live = board.is_live();
         if live {
             board.println(&ui::dim(format!("Checking {} tool(s)", list.tools.len())).to_string());
@@ -106,11 +109,16 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
     ]];
     let mut tones = vec![Tone::Good];
     let mut details = Vec::new();
+    let table_icons = !live && std::io::stdout().is_terminal();
     for name in names {
         let tool = list.tools.get(name);
         let st = state.tools.get(name).unwrap_or(&empty);
         rows.push([
-            name.clone(),
+            if table_icons {
+                icons.label(name, tool.and_then(|tool| tool.path.as_deref()))
+            } else {
+                name.clone()
+            },
             sha(&st.remote_main),
             sha(&st.checkout),
             sha(&st.installed),
@@ -160,7 +168,7 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
     let mut widths = [0; 6];
     for row in &rows {
         for (w, cell) in widths.iter_mut().zip(row) {
-            *w = (*w).max(cell.chars().count());
+            *w = (*w).max(measure_text_width(cell));
         }
     }
     for (r, (row, tone)) in rows.iter().zip(&tones).enumerate() {
@@ -170,7 +178,7 @@ pub fn run(paths: &Paths, offline: bool) -> Result<()> {
             let padded = if i == row.len() - 1 {
                 cell.clone()
             } else {
-                format!("{cell:<w$}  ")
+                format!("{}  ", pad_str(cell, w, Alignment::Left, None))
             };
             let styled = match (r, i) {
                 (0, _) => ui::bold(padded).to_string(),

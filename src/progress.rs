@@ -1,12 +1,15 @@
 //! Live per-tool spinners when stderr is a terminal; plain lines otherwise.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use console::{Term, strip_ansi_codes, truncate_str};
+use console::{Alignment, Term, measure_text_width, pad_str, strip_ansi_codes, truncate_str};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 
+use crate::project::IconStyle;
+use crate::tools::Tool;
 use crate::ui;
 
 /// Columns left free at the end of each row, in case the terminal draws some
@@ -26,16 +29,31 @@ pub struct Board {
 pub struct Row {
     bar: ProgressBar,
     name: String,
+    label: String,
     live: bool,
     width: usize,
 }
 
 impl Board {
-    pub fn new<'a>(names: impl IntoIterator<Item = &'a String>) -> (Self, Vec<Row>) {
+    pub fn new(tools: &BTreeMap<String, Tool>, icons: IconStyle) -> (Self, Vec<Row>) {
         let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
         let live = !multi.is_hidden();
-        let names: Vec<&String> = names.into_iter().collect();
-        let width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
+        let labels: Vec<_> = tools
+            .iter()
+            .map(|(name, tool)| {
+                let label = if live {
+                    icons.label(name, tool.path.as_deref())
+                } else {
+                    name.clone()
+                };
+                (name, label)
+            })
+            .collect();
+        let width = labels
+            .iter()
+            .map(|(_, label)| measure_text_width(label))
+            .max()
+            .unwrap_or(0);
         let style =
             ProgressStyle::with_template("{spinner:.cyan} {prefix:.bold.cyan}  {t:.dim}  {msg}")
                 .expect("valid template")
@@ -44,12 +62,13 @@ impl Board {
                 })
                 .tick_strings(SPINNER);
 
-        let rows = names
+        let rows = labels
             .into_iter()
-            .map(|name| {
+            .map(|(name, label)| {
                 let bar = multi.add(ProgressBar::new_spinner());
                 bar.set_style(style.clone());
-                bar.set_prefix(format!("{name:<width$}"));
+                let label = pad_str(&label, width, Alignment::Left, None).into_owned();
+                bar.set_prefix(label.clone());
                 bar.set_message(ui::dim("waiting").to_string());
                 if live {
                     bar.enable_steady_tick(TICK);
@@ -57,6 +76,7 @@ impl Board {
                 Row {
                     bar,
                     name: name.clone(),
+                    label,
                     live,
                     width,
                 }
@@ -130,7 +150,7 @@ impl Row {
             let msg = format!(
                 "{} {}  {}  {}",
                 ui::err_bad("✖"),
-                ui::err_name(format!("{:<w$}", self.name, w = self.width)),
+                ui::err_name(&self.label),
                 ui::err_dim(elapsed(self.bar.elapsed())),
                 outcome
             );
@@ -150,7 +170,7 @@ impl Row {
             let msg = format!(
                 "{} {}  {}  {}",
                 mark,
-                ui::name(format!("{:<w$}", self.name, w = self.width)),
+                ui::name(&self.label),
                 ui::dim(elapsed(self.bar.elapsed())),
                 outcome
             );
@@ -163,7 +183,9 @@ impl Row {
     fn finish(&self, msg: String) {
         self.bar
             .set_style(ProgressStyle::with_template("{msg}").expect("valid template"));
-        self.bar.finish_with_message(msg);
+        let width = term_width().saturating_sub(MARGIN);
+        self.bar
+            .finish_with_message(truncate_str(&msg, width, "...").into_owned());
     }
 }
 
@@ -193,8 +215,16 @@ mod tests {
 
     #[test]
     fn long_messages_never_reach_the_terminal_edge() {
-        let names = ["cesarferreira.github.io".to_string()];
-        let (_board, rows) = Board::new(&names);
+        let tools = BTreeMap::from([(
+            "cesarferreira.github.io".into(),
+            Tool {
+                url: String::new(),
+                path: None,
+                install: None,
+                pull: None,
+            },
+        )]);
+        let (_board, rows) = Board::new(&tools, IconStyle::None);
         let row = &rows[0];
         let long = format!("Compiling {}", "x".repeat(500));
         row.activity("installing", &long);

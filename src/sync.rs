@@ -11,13 +11,14 @@ use anyhow::{Context, Result, bail};
 use crate::git;
 use crate::paths::Paths;
 use crate::progress::{Board, Row};
+use crate::project::IconStyle;
 use crate::state::{ErrorKind, State, ToolError, ToolState, now};
 use crate::tools::{Tool, ToolList};
 use crate::ui;
 
 /// Returns `false` when any tool failed; the failures are already reported.
 /// With `install` false, tools are only pulled.
-pub fn run(paths: &Paths, jobs: Option<usize>, install: bool) -> Result<bool> {
+pub fn run(paths: &Paths, jobs: Option<usize>, install: bool, icons: IconStyle) -> Result<bool> {
     let _lock = acquire_lock(paths)?;
 
     let list = ToolList::load(paths)?;
@@ -33,7 +34,7 @@ pub fn run(paths: &Paths, jobs: Option<usize>, install: bool) -> Result<bool> {
 
     let total = list.tools.len();
     let jobs = jobs.unwrap_or(total).clamp(1, total);
-    let (board, rows) = Board::new(list.tools.keys());
+    let (board, rows) = Board::new(&list.tools, icons);
     if board.is_live() {
         board.println(
             &ui::err_dim(format!(

@@ -49,16 +49,18 @@ tsync
 
 ```text
 Syncing 5 tool(s), 5 at a time
-✖ broken-cli    1.1s  pulled +1 commit · install failed; will retry
-✔ markers       0.4s  installed existing checkout (a852d2d)
-● space         0.2s  skipped: on branch feature-x
-↑ stax          1.5s  pulled +4 commits · installed (bc5a317)
-· toppy         0.0s  up to date · pull only (aed9b83)
+✖ 🦀 broken-cli    1.1s  pulled +1 commit · install failed; will retry
+✔ 🐹 markers       0.4s  installed existing checkout (a852d2d)
+● 🦀 space         0.2s  skipped: on branch feature-x
+↑ 🦀 stax          1.5s  pulled +4 commits · installed (bc5a317)
+· 📁 notes         0.0s  up to date · pull only (aed9b83)
 
 2 pulled (5 commits) · 2 installed · 1 up to date · 1 skipped · 1 install failed
 ```
 
 All tools sync in parallel. Each row shows what the tool is doing, including the latest line of install output. The final rows show which checkouts moved, how many commits they gained, and any install result. The totals count pulls and installs separately, so a tool can appear in both. A pipe or timer gets plain output with the same results and totals.
+
+Interactive `sync` and `status` show project icons based on files in each registered checkout. For example, `Cargo.toml` gets 🦀, `go.mod` gets 🐹, `pyproject.toml` gets 🐍, and `tsconfig.json` gets 🔷. A repo with no recognized files gets 📁. Use `--icons nerd` with a current Nerd Font or `--icons none` for text-only names.
 
 Stop tracking a tool:
 
@@ -75,6 +77,7 @@ tsync remove my-tool    # or by name
 tsync                    # sync: pull every tool, install what changed (same as `tsync sync`)
 tsync -j 2               # at most 2 tools at a time
 tsync --pull             # only pull; skip installs this run
+tsync --icons nerd       # use Nerd Font project icons
 tsync status             # check every remote in parallel, then show each tool's state
 tsync status --offline   # last known state, no network
 tsync config             # where the tool list and data live
@@ -138,12 +141,12 @@ TOOLSYNC_HOME=~/tsync tsync          # keep everything, including tools.toml, in
 
 ```text
 Checking 3 tool(s)
-✔ alpha    0.4s  installed a852d2d
-● beta     0.5s  behind main a852d2d → 136b13b
-✖ gamma    0.3s  couldn't refresh; showing last known a852d2d
+✔ 🦀 alpha    0.4s  installed a852d2d
+● 🔷 beta     0.5s  behind main a852d2d → 136b13b
+✖ 🐍 gamma    0.3s  couldn't refresh; showing last known a852d2d
 ```
 
-Piped or with `--offline`, it prints a table instead:
+Piped output and `--offline` use a table. Here is the plain output from a pipe.
 
 ```text
 TOOL       MAIN     LOCAL     INSTALLED  CHECKED  STATUS

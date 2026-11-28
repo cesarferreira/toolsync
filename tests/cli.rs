@@ -262,11 +262,14 @@ fn new_entry_without_install_target_defaults_to_pull_only() {
 fn output_has_no_color_codes_when_piped() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
+    fs::write(dev.join("Cargo.toml"), "[workspace]\n").unwrap();
     let add = w.ok(&dev, &["add"]);
-    let sync = w.sync();
-    let status = w.ok(w.tmp.path(), &["status"]);
+    let sync = w.ok(w.tmp.path(), &["sync", "--icons", "nerd"]);
+    let status = w.ok(w.tmp.path(), &["status", "--icons", "nerd"]);
     for out in [add, sync, status] {
         assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(!out.contains('\u{e7a8}'), "{out:?}");
+        assert!(!out.contains('🦀'), "{out:?}");
     }
 }
 
