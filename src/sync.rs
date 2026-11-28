@@ -435,7 +435,7 @@ fn local_remote(dir: &Path, url: &str) -> Result<String> {
 }
 
 /// Sync only touches a repo that is on `main` with no uncommitted changes.
-fn skip_reason(repo: &git::RepoState) -> Option<String> {
+pub(crate) fn skip_reason(repo: &git::RepoState) -> Option<String> {
     match repo.branch.as_deref() {
         Some("main") => {}
         Some(branch) => return Some(format!("on branch {branch}")),

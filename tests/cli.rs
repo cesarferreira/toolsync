@@ -510,6 +510,29 @@ fn uncommitted_changes_are_skipped_not_overwritten() {
 }
 
 #[test]
+fn status_prefers_current_branch_over_the_last_sync_skip() {
+    let w = World::new();
+    let dev = w.tool_repo("my-tool");
+    w.ok(&dev, &["add", "--pull-only"]);
+
+    fs::write(dev.join("src/nested/lib.txt"), "local edit\n").unwrap();
+    let out = w.sync();
+    assert!(out.contains("skipped: uncommitted changes"), "{out}");
+    git(&dev, &["checkout", "--quiet", "--force", "-b", "feature"]);
+
+    for args in [&["status", "--offline"][..], &["status"][..]] {
+        let out = w.ok(w.tmp.path(), args);
+        assert!(out.contains("skipped: on branch feature"), "{out}");
+    }
+    git(&dev, &["checkout", "--quiet", "main"]);
+    let out = w.ok(w.tmp.path(), &["status", "--offline"]);
+    assert!(
+        out.contains("last sync skipped: uncommitted changes"),
+        "{out}"
+    );
+}
+
+#[test]
 fn unpushed_commits_on_main_are_skipped() {
     let w = World::new();
     let dev = w.tool_repo("my-tool");
@@ -804,9 +827,34 @@ fn config_shows_paths() {
     assert!(out.contains("Tool list"), "{out}");
     assert!(out.contains("not created yet"), "{out}");
     assert!(
+        out.contains(&w.home().join("settings.toml").display().to_string()),
+        "{out}"
+    );
+    assert!(
         out.contains(&w.home().join("logs").display().to_string()),
         "{out}"
     );
+}
+
+#[test]
+fn feature_flag_persists_icons_without_running_sync() {
+    let w = World::new();
+    let settings = w.home().join("settings.toml");
+    let out = w.fails(&["--feature", "icons", "maybe"]);
+    assert!(out.contains("expected `--feature icons on`"), "{out}");
+    assert!(!settings.exists());
+
+    let out = w.ok(w.tmp.path(), &["--feature", "icons", "off"]);
+    assert_eq!(out.trim(), "Project icons off");
+    assert_eq!(fs::read_to_string(&settings).unwrap(), "icons = false\n");
+
+    let tools = "[tools.example]\nurl = \"fixture-remote\"\n";
+    fs::write(w.home().join("tools.toml"), tools).unwrap();
+    let out = w.ok(w.tmp.path(), &["--feature", "icons", "on"]);
+    assert_eq!(out.trim(), "Project icons on");
+    assert_eq!(fs::read_to_string(&settings).unwrap(), "icons = true\n");
+    assert_eq!(w.tools_toml(), tools);
+    assert!(!w.home().join("state.toml").exists());
 }
 
 #[test]

@@ -10,7 +10,7 @@ use crate::paths::Paths;
 use crate::progress::Board;
 use crate::project::IconStyle;
 use crate::state::{ErrorKind, State, ToolError, ToolState, ago, now};
-use crate::sync::{acquire_lock, short};
+use crate::sync::{acquire_lock, short, skip_reason};
 use crate::tools::{Tool, ToolList};
 use crate::ui;
 
@@ -37,6 +37,7 @@ pub fn run(paths: &Paths, offline: bool, icons: IconStyle) -> Result<()> {
     let mut state = State::load(paths)?;
     let now = now();
     let mut unreachable = BTreeMap::new();
+    let mut local_skips = BTreeMap::new();
     let mut live = false;
     if !offline && !list.tools.is_empty() {
         let (board, rows) = Board::new(&list.tools, icons);
@@ -54,14 +55,14 @@ pub fn run(paths: &Paths, offline: bool, icons: IconStyle) -> Result<()> {
                     s.spawn(move || {
                         row.stage(ui::warn("checking remote main").to_string());
                         let mut st = state_ref.tools.get(name).cloned().unwrap_or_default();
-                        read_local_main(tool, &mut st);
+                        let local_skip = read_local_checkout(tool, &mut st);
                         let missed = apply(&mut st, check_remote(tool), now);
-                        let (label, tone) = describe(Some(tool), &st);
+                        let (label, tone) = describe(Some(tool), &st, local_skip.as_deref());
                         row.done(
                             tone.mark(),
                             format!("{} {}", tone.paint(label), ui::dim(shas(&st))),
                         );
-                        (name.clone(), st, missed)
+                        (name.clone(), st, missed, local_skip)
                     })
                 })
                 .collect();
@@ -70,9 +71,12 @@ pub fn run(paths: &Paths, offline: bool, icons: IconStyle) -> Result<()> {
                 .map(|h| h.join().expect("status thread panicked"))
                 .collect()
         });
-        for (name, st, missed) in results {
+        for (name, st, missed, local_skip) in results {
             if let Some(message) = missed {
                 unreachable.insert(name.clone(), message);
+            }
+            if let Some(reason) = local_skip {
+                local_skips.insert(name.clone(), reason);
             }
             state.tools.insert(name, st);
         }
@@ -83,8 +87,10 @@ pub fn run(paths: &Paths, offline: bool, icons: IconStyle) -> Result<()> {
     drop(lock);
     if offline {
         for (name, tool) in &list.tools {
-            if let Some(st) = state.tools.get_mut(name) {
-                read_local_main(tool, st);
+            let mut initial = ToolState::default();
+            let st = state.tools.get_mut(name).unwrap_or(&mut initial);
+            if let Some(reason) = read_local_checkout(tool, st) {
+                local_skips.insert(name.clone(), reason);
             }
         }
     }
@@ -125,7 +131,7 @@ pub fn run(paths: &Paths, offline: bool, icons: IconStyle) -> Result<()> {
             ago(st.remote_checked_at, now),
             String::new(),
         ]);
-        let (label, tone) = describe(tool, st);
+        let (label, tone) = describe(tool, st, local_skips.get(name).map(String::as_str));
         rows.last_mut().expect("just pushed")[5] = label;
         tones.push(tone);
         if tool.is_none() {
@@ -208,17 +214,22 @@ pub fn run(paths: &Paths, offline: bool, icons: IconStyle) -> Result<()> {
     Ok(())
 }
 
-/// The repo is the user's own, so `main` may have moved since the last sync.
-/// Read its local `main` instead of trusting the recorded value.
-fn read_local_main(tool: &Tool, st: &mut ToolState) {
-    if let Some(dir) = &tool.path
-        && let Ok(sha) = git::run(
+/// Refresh the local `main` SHA and report why the current working tree would be skipped.
+fn read_local_checkout(tool: &Tool, st: &mut ToolState) -> Option<String> {
+    let dir = tool.path.as_deref()?;
+    let repo = git::repo_state(dir).ok();
+    let main = match &repo {
+        Some(repo) if repo.branch.as_deref() == Some("main") => repo.head.clone(),
+        _ => git::run(
             Some(dir),
             &["rev-parse", "--verify", "--quiet", "refs/heads/main"],
         )
-    {
+        .ok(),
+    };
+    if let Some(sha) = main {
         st.checkout = Some(sha);
     }
+    repo.as_ref().and_then(skip_reason)
 }
 
 /// Read remote `main` for one tool.
@@ -302,15 +313,18 @@ impl Tone {
     }
 }
 
-fn describe(tool: Option<&Tool>, st: &ToolState) -> (String, Tone) {
+fn describe(tool: Option<&Tool>, st: &ToolState, local_skip: Option<&str>) -> (String, Tone) {
     let Some(tool) = tool else {
         return ("not in tool list".into(), Tone::Warn);
     };
     if let Some(err) = &st.error {
         return (err.summary().to_string(), Tone::Bad);
     }
-    if let Some(reason) = &st.skipped {
+    if let Some(reason) = local_skip {
         return (format!("skipped: {reason}"), Tone::Warn);
+    }
+    if let Some(reason) = &st.skipped {
+        return (format!("last sync skipped: {reason}"), Tone::Warn);
     }
     let Some(checkout) = &st.checkout else {
         return ("not synced yet".into(), Tone::Warn);

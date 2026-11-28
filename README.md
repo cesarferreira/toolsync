@@ -60,7 +60,7 @@ Syncing 5 tool(s), 5 at a time
 
 All tools sync in parallel. Each row shows what the tool is doing, including the latest line of install output. The final rows show which checkouts moved, how many commits they gained, and any install result. The totals count pulls and installs separately, so a tool can appear in both. A pipe or timer gets plain output with the same results and totals.
 
-Interactive `sync` and `status` show project icons based on files in each registered checkout. For example, `Cargo.toml` gets 🦀, `go.mod` gets 🐹, `pyproject.toml` gets 🐍, and `tsconfig.json` gets 🔷. A repo with no recognized files gets 📁. Use `--icons nerd` with a current Nerd Font or `--icons none` for text-only names.
+Interactive `sync` and `status` show project icons based on files in each registered checkout. For example, `Cargo.toml` gets 🦀, `go.mod` gets 🐹, `pyproject.toml` gets 🐍, and `tsconfig.json` gets 🔷. A repo with no recognized files gets 📁. Use `--icons nerd` with a current Nerd Font or `--icons none` for text-only names on a single run.
 
 Stop tracking a tool:
 
@@ -78,6 +78,8 @@ tsync                    # sync: pull every tool, install what changed (same as 
 tsync -j 2               # at most 2 tools at a time
 tsync --pull             # only pull; skip installs this run
 tsync --icons nerd       # use Nerd Font project icons
+tsync --feature icons off # hide project icons on future runs
+tsync --feature icons on  # show project icons on future runs
 tsync status             # check every remote in parallel, then show each tool's state
 tsync status --offline   # last known state, no network
 tsync config             # where the tool list and data live
@@ -113,7 +115,10 @@ pull = "stax rs"                   # absent = built-in git fast-forward
 | What | Linux and macOS |
 |---|---|
 | Tool list | `~/.config/toolsync/tools.toml` (or `$XDG_CONFIG_HOME/toolsync/`) |
+| Settings | `~/.config/toolsync/settings.toml` (or `$XDG_CONFIG_HOME/toolsync/`) |
 | State, logs | `~/.local/share/toolsync/` (or `$XDG_DATA_HOME/toolsync/`) |
+
+Project icons are on by default. To hide them for both `sync` and `status`, run `tsync --feature icons off` or set `icons = false` in `settings.toml`. An explicit `--icons` flag takes precedence for that run.
 
 Earlier versions kept everything in `~/Library/Application Support/toolsync/` on macOS. tsync moves those files to the new locations the first time it runs.
 
@@ -155,6 +160,8 @@ other-cli  4a92f37  4a92f37   —          4m ago   synced (pull only)
 ```
 
 If a remote can't be reached, `MAIN` shows the last known value. `INSTALLED` is the last commit whose install command succeeded on this machine. It doesn't prove that the binary on `PATH` matches it.
+
+Status shows the current checkout reason if a branch or tracked changes would cause a skip. A `last sync skipped` label gives the saved reason from the previous sync.
 
 ## Custom pull and install commands
 

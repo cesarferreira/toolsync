@@ -55,6 +55,10 @@ impl Paths {
         &self.tools_file
     }
 
+    pub fn settings_file(&self) -> PathBuf {
+        self.tools_file.with_file_name("settings.toml")
+    }
+
     pub fn state_file(&self) -> PathBuf {
         self.root.join("state.toml")
     }
